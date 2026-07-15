@@ -1,0 +1,48 @@
+# ── Large medical imaging data (too large for GitHub) ──
+*.nrrd
+*.nii
+*.nii.gz
+*.dcm
+*.mha
+*.mhd
+*.raw
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Jupyter ──
+*.ipynb_checkpoints/
+.ipynb_checkpoints
+
+# ── Virtual environments ──
+.venv/
+venv/
+env/
+.conda/
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── OS ──
+.DS_Store
+Thumbs.db
+
+# ── Logs & temp ──
+logs/*.log
+logs/*.pid
+nohup.out
+*.tmp
+
+# ── Large result files (keep JSONs and PDF, skip per-patient overlays if needed) ──
+# Uncomment below to also exclude overlay PNGs:
+# results/**/*.png

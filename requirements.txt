@@ -1,0 +1,21 @@
+# Core scientific computing
+numpy>=1.23
+scipy>=1.9
+matplotlib>=3.6
+Pillow>=9.0
+
+# Medical imaging
+SimpleITK>=2.2
+
+# Computer vision
+opencv-python>=4.7
+
+# Deep learning / GPU DRR rendering
+torch>=2.0
+torchvision>=0.15
+
+# Optimisation
+cmaes>=0.9
+
+# Utilities
+tqdm>=4.64

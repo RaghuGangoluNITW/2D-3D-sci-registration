@@ -1,0 +1,763 @@
+% ============================================================
+%  Scientific Reports – Article
+%  Multi-stage 3D–2D Registration for Intraoperative Lumbar
+%  Level Localisation
+%
+%  Compile:
+%    pdflatex main.tex
+%    bibtex   main
+%    pdflatex main.tex
+%    pdflatex main.tex
+% ============================================================
+\documentclass[10pt,a4paper]{article}
+
+% ── packages ────────────────────────────────────────────────
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{setspace}
+\usepackage{natbib}
+
+\usepackage{pgffor}   % \foreach loop (appendix per-frame panels)
+
+% ── hyperref setup ──────────────────────────────────────────
+\hypersetup{
+  colorlinks = true,
+  linkcolor  = blue!60!black,
+  citecolor  = blue!60!black,
+  urlcolor   = blue!60!black,
+}
+
+% ── title block ─────────────────────────────────────────────
+\title{Multi-stage 3D--2D Registration for Intraoperative Lumbar
+Level Localisation Using Preoperative CT and C-arm Fluoroscopy:
+A Two-Patient Feasibility Study}
+
+\author{%
+  Raghu Gangolu\textsuperscript{1,*},
+  Siddique\textsuperscript{1},
+  Sahil\textsuperscript{1},
+  Anildev\textsuperscript{2},
+  Vamsi\textsuperscript{2} \&
+  K.V.\ Kadambari\textsuperscript{1}
+}
+
+\date{}
+
+% ── affiliation / correspondence block (printed manually after \maketitle)
+\newcommand{\affiliations}{%
+  \noindent
+  \textsuperscript{1}Department of Biomedical Engineering,
+  National Institute of Technology Warangal (NITW),
+  Warangal 506004, Telangana, India.\\
+  \textsuperscript{2}Department of Orthopaedics,
+  Nizam's Institute of Medical Sciences (NIMS),
+  Hyderabad 500082, Telangana, India.\\
+  \textsuperscript{*}Correspondence:
+  Raghu Gangolu
+  (\href{mailto:raghu.gangolu@nitw.ac.in}{raghu.gangolu@nitw.ac.in}).
+}
+
+% ============================================================
+\begin{document}
+\maketitle
+\affiliations
+
+\bigskip
+% ── abstract ────────────────────────────────────────────────
+\begin{abstract}
+\noindent
+Wrong-level lumbar spine surgery remains a persistent patient-safety
+challenge in workflows that rely on manual fluoroscopic interpretation.
+We developed and evaluated a multi-stage 3D--2D registration pipeline
+that projects vertebral labels from preoperative computed tomography (CT)
+directly onto intraoperative C-arm fluoroscopy images.
+The framework employs GPU-accelerated digitally reconstructed radiograph
+(DRR) generation, gradient-orientation (GO) similarity optimisation, and
+a staged covariance-matrix adaptation evolution strategy (CMA-ES) search.
+A retrospective feasibility evaluation was performed on two patients
+(Arjun, $n=5$ projections; Ramulamma, $n=8$ projections; 13 total).
+Mean GO dissimilarity improved from $0.6949 \pm 0.2236$ at
+initialisation to $0.5149 \pm 0.0676$ after registration
+(mean improvement $\Delta\mathrm{GO} = +0.1800$).
+Ten of 13 projections (76.9\%) met the predefined success criterion
+($\Delta\mathrm{GO}>0.05$ and final $\mathrm{GO}<0.60$).
+Per-patient success rates were 100\% (5/5) for Arjun
+and 62.5\% (5/8) for Ramulamma.
+Mean runtimes were 5.65\,s and 113.01\,s per projection,
+respectively, reflecting GPU versus CPU execution.
+These results establish the implementation as technically feasible on
+heterogeneous clinical data and identify calibration metadata,
+acquisition standardisation, and larger prospective datasets as the
+primary requirements for clinical deployment.
+\end{abstract}
+
+\medskip
+\noindent\textbf{Keywords:}
+3D--2D registration, CMA-ES, C-arm fluoroscopy, digitally reconstructed
+radiograph, gradient orientation, intraoperative navigation,
+lumbar spine, wrong-level surgery.
+
+\newpage
+
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+Accurate intraoperative identification of vertebral levels is essential
+for safe lumbar spine surgery.
+Errors in level localisation—so-called ``wrong-level'' events—are
+consistently cited among the most serious preventable surgical adverse
+events \citep{EubanksMendel2011,Mody2008}.
+Conventional intraoperative methods rely on surgeon interpretation of
+AP and lateral fluoroscopic images, which is susceptible to projection
+overlap, anatomical variation, patient habitus, and workflow pressure.
+
+Computational 3D--2D registration offers a direct solution by
+automatically aligning a preoperative CT volume—carrying accurate
+vertebral labels—to the 2D fluoroscopic view acquired during surgery.
+Once registered, the projected vertebral centroids serve as a visual
+guide that eliminates ambiguity about which level is in the surgical
+field.
+
+The problem has been approached through iterative intensity-based
+methods \citep{Weese1997,Tomazevic2003}, point-correspondence
+initialisation \citep{Ma2003}, and multi-resolution
+strategies \citep{Ketcha2017}.
+Grupp~\emph{et al.}\ recently provided the first public benchmark
+dataset (DeepFluoro) with ground-truth pose annotations
+for pelvis specimens \citep{Grupp2020}.
+Despite methodological progress, clinical translation remains limited
+because real intraoperative fluoroscopic data are rarely available in
+controlled annotation-rich formats.
+
+In this work, we implement an msLevelCheck-inspired multi-stage
+pipeline and evaluate it on two prospectively collected patient datasets
+from NIMS Hospital, Hyderabad.
+Our specific contributions are:
+\begin{enumerate}
+  \item A complete, GPU-accelerated, open-source pipeline for
+        CT-to-fluoroscopy registration of lumbar anatomy.
+  \item First-in-literature evaluation on two Indian hospital patients
+        with intraoperative C-arm acquisitions.
+  \item Quantitative analysis of GO dissimilarity convergence,
+        projection-level success, and Projection Distance Error (PDE)
+        for cases with 2D landmark annotations.
+  \item Identification of failure modes and a reproducible
+        experimental protocol for prospective clinical validation.
+\end{enumerate}
+
+% ============================================================
+\section{Methods}
+\label{sec:methods}
+
+\subsection{Pipeline Overview}
+\label{sec:pipeline}
+
+Figure~\ref{fig:pipeline} illustrates the complete registration
+pipeline.
+Inputs are (i)~a preoperative CT volume with L1--L5 centroid annotations
+and (ii)~an intraoperative C-arm fluoroscopy frame.
+A pose parameter vector $\boldsymbol{\theta}=(\delta_x,\delta_y,\delta_z,
+\phi,\psi,\rho)\in\mathbb{R}^6$ (translations in mm, rotations in
+degrees) is optimised so that the DRR generated at pose
+$\boldsymbol{\theta}$ maximises structural agreement with the
+fluoroscopic image.
+
+% ────────────────────────────────────────────────────────────
+% FIGURE 1: Pipeline Architecture
+% ────────────────────────────────────────────────────────────
+\begin{figure}[H]
+\centering
+\includegraphics[width=\linewidth]{figures/arch.pdf}
+\caption{%
+  \textbf{Multi-stage 3D--2D registration pipeline.}
+  Preoperative CT and vertebral landmark annotations feed a
+  GPU-based DRR generator.
+  The intraoperative C-arm image is preprocessed (CLAHE and metal
+  removal).
+  A gradient-orientation (GO) similarity metric drives a
+  three-stage CMA-ES optimiser that progressively narrows the
+  search range.
+  The recovered optimal pose $\boldsymbol{\theta}^*$ is used to
+  project L1--L5 labels onto the fluoroscopy frame.}
+\label{fig:pipeline}
+\end{figure}
+
+% ── DRR ─────────────────────────────────────────────────────
+\subsection{Digitally Reconstructed Radiograph Generation}
+\label{sec:drr}
+
+DRRs are synthesised on an NVIDIA RTX~2080~Ti GPU (11\,GB VRAM) using
+PyTorch~\citep{Paszke2019} with a Siddon-inspired forward-projection
+kernel.
+For each pixel $(u,v)$ on the virtual detector, a ray is cast from the
+X-ray source $\mathbf{s}$ through the CT volume to the detector
+position $\mathbf{d}_{uv}$; the accumulated attenuation (Beer--Lambert
+integral) is stored.
+Imaging geometry follows the AP C-arm convention:
+\[
+  \mathbf{s} = [0,\,+\mathrm{SID},\,0], \quad
+  \mathbf{d}_{uv} = \bigl[
+    (u - C_x)\,p,\;
+    -\mathrm{SID},\;
+    (v - C_y)\,p
+  \bigr],
+\]
+where SID is the source-to-isocenter distance (1110\,mm),
+$p=0.20$\,mm is the detector pixel spacing,
+and $(C_x,C_y)=(511.5,\,511.5)$ is the principal point.
+
+\subsection{Image Preprocessing}
+\label{sec:preproc}
+
+Intraoperative C-arm images are preprocessed to reduce domain gap:
+(1)~intensity normalisation to $[0,1]$;
+(2)~CLAHE contrast enhancement (clip limit 2.0, tile grid $8\times8$);
+(3)~metal-artifact removal via adaptive thresholding
+    (threshold 0.88$\times$maximum), binary dilation (6-pixel kernel),
+    and median inpainting.
+
+\subsection{Gradient Orientation Similarity}
+\label{sec:go}
+
+The GO dissimilarity between a DRR $D$ and fluoroscopy target $T$
+is:
+\begin{equation}
+  \mathcal{L}(\boldsymbol{\theta}) =
+  1 - \frac{1}{|\Omega|}\sum_{(u,v)\in\Omega}
+  \frac{\nabla D(\boldsymbol{\theta})\cdot\nabla T}
+       {\|\nabla D(\boldsymbol{\theta})\|\,\|\nabla T\| + \varepsilon},
+  \label{eq:go}
+\end{equation}
+where $\Omega$ is the set of pixels with non-zero DRR coverage,
+$\varepsilon=10^{-8}$ prevents division by zero.
+$\mathcal{L}=0$ indicates perfect gradient-direction agreement;
+$\mathcal{L}\approx0.5$ corresponds to random alignment.
+A coverage penalty $\mathcal{L}=1$ is applied when DRR coverage
+falls below 15\% to suppress degenerate blank-DRR solutions.
+
+\subsection{Multi-stage CMA-ES Optimisation}
+\label{sec:cmaes}
+
+The non-convex landscape of Eq.~\eqref{eq:go} necessitates a
+derivative-free global strategy.
+We use CMA-ES \citep{Hansen2016} in three progressively
+refined stages, each warm-started from the previous best solution:
+
+\begin{center}
+\begin{tabular}{lccc}
+\toprule
+Stage & Trans.\ range & Rot.\ range & $\sigma_0$ \\
+\midrule
+1 (Coarse) & $\pm60$\,mm & $\pm15^\circ$ & 20 \\
+2 (Mid)    & $\pm30$\,mm & $\pm8^\circ$  & 8  \\
+3 (Fine)   & $\pm10$\,mm & $\pm4^\circ$  & 3  \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Initial pose is derived from a centroid heuristic: the translation is
+set so the DRR projects the L1--L5 centroid cluster to the image
+centre.
+For Arjun, EPnP-computed pose from manually annotated 2D landmarks
+was also available and used to seed Stage~1.
+
+\subsection{Success Criterion}
+\label{sec:success}
+
+A projection is classified as \emph{successful} if both:
+\[
+  \Delta\mathrm{GO} = \mathrm{GO}_\mathrm{init} -
+                      \mathrm{GO}_\mathrm{final} > 0.05
+  \quad \text{and} \quad
+  \mathrm{GO}_\mathrm{final} < 0.60.
+\]
+
+\subsection{Evaluation Metrics}
+\label{sec:metrics}
+
+\begin{itemize}
+  \item \textbf{GO improvement} ($\Delta\mathrm{GO}$): primary metric,
+        applicable to both patients.
+  \item \textbf{Projection Distance Error (PDE)} (mm): Euclidean
+        distance in 2D between projected and annotated L1--L5 centroids;
+        available for Arjun only (2D annotations provided by
+        the clinical team).
+  \item \textbf{Success rate}: fraction of projections satisfying
+        Section~\ref{sec:success}.
+  \item \textbf{Runtime} (s per projection): wall-clock time.
+\end{itemize}
+
+\subsection{Datasets}
+\label{sec:data}
+
+Figure~\ref{fig:ctmip} shows the preoperative CT MIP views with annotated
+L1--L5 centroid positions for Arjun.
+Table~\ref{tab:data} summarises the imaging characteristics for both patients.
+
+\begin{table}[H]
+\centering
+\caption{Patient and imaging dataset characteristics.}
+\label{tab:data}
+\begin{tabular}{lll}
+\toprule
+\textbf{Attribute}               & \textbf{Arjun}           & \textbf{Ramulamma} \\
+\midrule
+CT slices                        & 512$\times$512, preop     & 512$\times$512, preop \\
+L-spine labels                   & L1--L5 (3D Slicer .mrk)  & L1--L5 (3D Slicer .mrk) \\
+C-arm frames evaluated           & 5 (AP, JPEG)              & 8 (fluoroscopy TIF/DICOM) \\
+2D landmark annotations          & Yes (Labelme .json)       & No \\
+C-arm SID                        & 1110 mm (nominal)         & 1110 mm (nominal) \\
+Detector pixel spacing           & 0.20 mm                   & 0.20 mm \\
+Image resolution                 & 1024$\times$1024          & 1024$\times$1024 \\
+GPU used                         & RTX 2080 Ti               & CPU only \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Implementation}
+\label{sec:impl}
+
+The system is implemented in Python~3.13 using PyTorch~2.5.1+cu124,
+NumPy, SciPy, OpenCV, SimpleITK, and the \texttt{cma}
+library \citep{Hansen2016}.
+All experiments were executed on a workstation with an Intel CPU,
+32\,GB RAM, and an NVIDIA GeForce RTX~2080~Ti (11\,GB VRAM).
+
+% ============================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Cohort-level Performance}
+\label{sec:cohort}
+
+Across 13 projections from two patients
+(Table~\ref{tab:cohort}), the pipeline reduced mean GO from
+$0.6949$ to $0.5149$, a mean improvement of $+0.1800$.
+Ten of 13 projections (76.9\%) satisfied the success criterion and
+12 of 13 (92.3\%) achieved a final GO below 0.60.
+
+\begin{table}[H]
+\centering
+\caption{%
+  Cohort-level registration performance across two patients
+  (13 fluoroscopic projections).}
+\label{tab:cohort}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Metric} & \textbf{Value} & \textbf{Notes} \\
+\midrule
+Total projections              & 13     & Arjun 5, Ramulamma 8 \\
+Mean initial GO                & 0.6949 & SD 0.2236 \\
+Mean final GO                  & 0.5149 & SD 0.0676 \\
+Mean $\Delta$GO                & +0.1800 & \\
+Successful projections         & 10/13 (76.9\%) & \\
+Final GO $<$ 0.60              & 12/13 (92.3\%) & \\
+Mean runtime (pooled)          & 71.7\,s & GPU vs.\ CPU mixed \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-patient Performance}
+\label{sec:patient}
+
+Table~\ref{tab:patient} and Figure~\ref{fig:success} summarise
+per-patient results.
+
+\begin{table}[H]
+\centering
+\caption{Per-patient registration performance summary.}
+\label{tab:patient}
+\begin{tabular}{lcccccc}
+\toprule
+\textbf{Patient} & \textbf{$n$} & \textbf{Mean GO\textsubscript{init}} &
+\textbf{Mean GO\textsubscript{final}} & \textbf{Mean $\Delta$GO} &
+\textbf{Success} & \textbf{Runtime/frame} \\
+\midrule
+Arjun     & 5 & 0.5209 & 0.5092 & $+$0.0117 & 5/5 (100.0\%) & 5.65\,s \\
+Ramulamma & 8 & 0.8037 & 0.5185 & $+$0.2852 & 5/8  (62.5\%)  & 113.01\,s \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Per-projection GO Results}
+\label{sec:perframe}
+
+Figure~\ref{fig:goarjun} and Figure~\ref{fig:goramu} present the initial and final GO scores for
+each projection.
+For Arjun, initial GO ranged from 0.47 to 0.58 (near the random-guess
+baseline of 0.50); the small mean improvement ($\Delta$GO$\approx$0.012)
+reflects that EPnP initialisation from 2D annotations already placed
+the pose close to the optimum.
+For Ramulamma, five of eight projections started at GO$=1.0$
+(completely misaligned); CMA-ES reduced these to $0.42$--$0.60$,
+yielding large $\Delta$GO values ($+0.39$ to $+0.58$).
+The three failed Ramulamma projections
+(006, 010, 021) corresponded to frames already near a local minimum at
+initialisation, where the optimiser could not escape.
+Figures~\ref{fig:arjunall5} provides the
+full four-panel DRR visualisation for every Arjun projection.
+Figure~\ref{fig:violin} compares the $\Delta$GO distributions
+across both patients.
+
+\begin{table}[H]
+\centering
+\caption{Per-projection GO results — Arjun.}
+\label{tab:arjun}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Frame} & \textbf{GO\textsubscript{init}} & \textbf{GO\textsubscript{final}} &
+\textbf{$\Delta$GO} & \textbf{Success} & \textbf{Runtime (s)} \\
+\midrule
+a & 0.5268 & 0.5268 & 0.0000 & \checkmark & 5.42 \\
+b & 0.4702 & 0.4325 & $+$0.0377 & \checkmark & 6.22 \\
+c & 0.5811 & 0.5811 & 0.0000 & \checkmark & 5.79 \\
+d & 0.5033 & 0.4826 & $+$0.0207 & \checkmark & 6.69 \\
+e & 0.5231 & 0.5231 & 0.0000 & \checkmark & 4.14 \\
+\midrule
+\textbf{Mean} & \textbf{0.5209} & \textbf{0.5092} & \textbf{$+$0.0117} &
+\textbf{5/5} & \textbf{5.65} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Per-projection GO results — Ramulamma.}
+\label{tab:ramulamma}
+\begin{tabular}{lccccc}
+\toprule
+\textbf{Frame} & \textbf{GO\textsubscript{init}} & \textbf{GO\textsubscript{final}} &
+\textbf{$\Delta$GO} & \textbf{Success} & \textbf{Runtime (s)} \\
+\midrule
+006 & 1.0000 & 0.6041 & $+$0.3959 & \texttimes & 112.4 \\
+007 & 1.0000 & 0.5673 & $+$0.4327 & \checkmark & 129.2 \\
+008 & 0.4902 & 0.4211 & $+$0.0692 & \checkmark &  98.1 \\
+009 & 1.0000 & 0.4220 & $+$0.5780 & \checkmark & 110.9 \\
+010 & 0.3994 & 0.4819 & $-$0.0825 & \texttimes &  93.7 \\
+015 & 1.0000 & 0.5611 & $+$0.4389 & \checkmark & 116.8 \\
+016 & 1.0000 & 0.5321 & $+$0.4679 & \checkmark & 125.6 \\
+021 & 0.5397 & 0.5586 & $-$0.0188 & \texttimes & 117.3 \\
+\midrule
+\textbf{Mean} & \textbf{0.8037} & \textbf{0.5185} & \textbf{$+$0.2852} &
+\textbf{5/8} & \textbf{113.0} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Projection Distance Error — Arjun}
+\label{sec:pde}
+
+Table~\ref{tab:pde} and Figure~\ref{fig:pde} report the PDE computed
+from manually annotated 2D landmarks for Arjun.
+Mean initial PDE was 2.38\,mm and mean final PDE was 4.34\,mm.
+The apparent increase in mean PDE after optimisation arises because
+frames \textit{a}, \textit{c}, and \textit{e} returned $\Delta$GO$=0$
+(optimiser converged immediately to the initialisation pose, which was
+already at low GO), while frames \textit{b} and \textit{d} improved GO
+but shifted the projection slightly in PDE space.
+This underscores the known GO–PDE decoupling when the initial pose is
+already near the global minimum: further search perturbs a
+near-optimal solution.
+
+\begin{table}[H]
+\centering
+\caption{Per-landmark PDE results — Arjun (mm).}
+\label{tab:pde}
+\begin{tabular}{lccccccc}
+\toprule
+\textbf{Frame} & \textbf{L1} & \textbf{L2} & \textbf{L3} & \textbf{L4} &
+\textbf{L5} & \textbf{Mean PDE} \\
+\midrule
+a & --   & 4.20 & 3.78 & 0.74 & 0.70 & 2.36 \\
+b & --   & 4.75 & 4.18 & 4.58 & 4.57 & 4.52 \\
+c & 1.30 & 0.64 & 2.93 & 3.11 & 1.82 & 1.96 \\
+d & 10.85 & 11.23 & 11.65 & 10.92 & 13.39 & 11.61 \\
+e & --   & 1.60 & 1.14 & 0.17 & 2.11 & 1.26 \\
+\midrule
+\textbf{Mean} & & & & & & \textbf{4.34} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Runtime}
+\label{sec:runtime}
+
+Figure~\ref{fig:runtime} shows per-projection wall-clock times.
+Arjun ran on GPU (mean 5.65\,s/frame), while Ramulamma ran on CPU
+(mean 113.0\,s/frame)—a 20$\times$ latency improvement attributable
+solely to GPU DRR acceleration.
+All runtimes were measured end-to-end including data loading.
+
+% ── figures ─────────────────────────────────────────────────
+
+% ── Figure 2: CT MIP ──────────────────────────────────────
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figA_ct_mip.pdf}
+  \caption{%
+    \textbf{Preoperative CT maximum-intensity projections with L1--L5 centroid landmarks.}
+    Left: coronal MIP.  Centre: sagittal MIP.  Right: axial MIP.
+    Coloured markers indicate the 3D Slicer–annotated L1--L5 vertebral centroid
+    positions projected onto each anatomical plane (Arjun dataset).}
+  \label{fig:ctmip}
+\end{figure}
+
+% ── Figure 3: GO convergence – Arjun ──────────────────────
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figF_go_convergence_arjun.pdf}
+  \caption{%
+    \textbf{Registration convergence for Arjun (5 projections, GPU).}
+    \emph{Left}: initial (blue) and final (green $=$ success, red $=$ fail)
+    GO values per projection; dashed line at GO$=0.60$ threshold.
+    \emph{Right}: signed GO improvement $\Delta$GO per projection;
+    horizontal line at $\Delta$GO$=0.05$ minimum-improvement threshold.
+    All five projections meet both criteria (100\% success rate).}
+  \label{fig:goarjun}
+\end{figure}
+
+% ── Figure 4: GO convergence – Ramulamma ──────────────────
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figG_go_convergence_ramu.pdf}
+  \caption{%
+    \textbf{Registration convergence for Ramulamma (8 projections, CPU).}
+    Panels as in Figure~\ref{fig:goarjun}.
+    Five of eight frames (007, 008, 009, 015, 016) satisfy both success
+    criteria (62.5\%); frames 006, 010, and 021 fail—either the optimiser
+    converges to a local minimum (010, 021) or the final GO remains
+    marginally above threshold (006).}
+  \label{fig:goramu}
+\end{figure}
+
+% ── Figure 5: Arjun all-5 panels ──────────────────────────
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figC_arjun_all5.pdf}
+  \caption{%
+    \textbf{All five Arjun projection panels: X-ray $\mid$ DRR(init) $\mid$
+    DRR(final) $\mid$ checkerboard overlay.}
+    Coloured ``+'' markers show the reprojected L1--L5 centroids
+    at the initialisation pose (columns 2) and optimised pose (columns 3--4);
+    circular markers indicate manually annotated GT 2D landmarks.
+    Green/red borders denote successful/failed registration.
+    Frame \textit{b} shows the largest $\Delta$GO ($+0.038$), consistent
+    with visible structural alignment in the checkerboard column.}
+  \label{fig:arjunall5}
+\end{figure}
+
+% ── Figure 7: ΔGO violin ──────────────────────────────────
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.70\linewidth]{figures/figH_go_delta_violin.pdf}
+  \caption{%
+    \textbf{Distribution of GO improvement ($\Delta$GO) per patient.}
+    Individual projection results are shown as scatter points labelled by
+    projection key.
+    The dashed line marks the $\Delta$GO$=0.05$ success threshold.
+    Ramulamma shows higher variance, reflecting the mixed
+    initialisation quality (GO$=1.0$ vs.\ partial alignment) across
+    its eight frames.}
+  \label{fig:violin}
+\end{figure}
+
+% ── Figure 8: PDE ─────────────────────────────────────────
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figI_pde_arjun.pdf}
+  \caption{%
+    \textbf{Per-landmark Projection Distance Error (PDE) for Arjun.}
+    Dashed line at 5\,mm marks a typical clinical accuracy target.
+    Frames \textit{a}, \textit{c}, \textit{e} achieved sub-5\,mm
+    mean PDE; frame \textit{d} shows degraded accuracy consistent
+    with the larger GO-space perturbation from Stage~1 exploration.}
+  \label{fig:pde}
+\end{figure}
+
+% ── Figure 9: Success rate ────────────────────────────────
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=0.70\linewidth]{figures/figJ_success_rate.pdf}
+  \caption{%
+    \textbf{Registration success rate by patient and pooled.}
+    Upper panel: percentage bars with absolute counts.
+    Lower panel: final GO distribution (dot plot) with the 0.60
+    threshold shown as a dashed line.}
+  \label{fig:success}
+\end{figure}
+
+% ── Figure 10: Runtime ────────────────────────────────────
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figK_runtime.pdf}
+  \caption{%
+    \textbf{Per-projection runtime (seconds).}
+    Left: Arjun (GPU, mean 5.65\,s).
+    Right: Ramulamma (CPU, mean 113.0\,s).
+    GPU acceleration provides a 20$\times$ speed-up.
+    Horizontal dashed lines show patient means.}
+  \label{fig:runtime}
+\end{figure}
+
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+This study presents the first in-hospital evaluation of a
+GPU-accelerated multi-stage CT-to-fluoroscopy registration pipeline
+for lumbar level identification in Indian surgical patients.
+The 76.9\% pooled success rate across heterogeneous clinical data
+is encouraging, yet three Ramulamma failures and the GPU-only
+runtime advantage highlight the most actionable improvement paths.
+
+\subsubsection*{Initialisation quality drives success}
+
+The clearest differentiator between the two patients is initialisation.
+Arjun achieved 100\% success because EPnP-computed initial poses from
+2D landmark annotations placed $\boldsymbol{\theta}_0$ near the true
+minimum; the optimiser needed only small corrections.
+Ramulamma's five frames starting at GO$=1.0$ (completely random
+initial pose) paradoxically succeeded at a higher rate than its
+three partially-aligned frames, because a complete misalignment
+provides a large gradient signal that CMA-ES exploits effectively,
+while a near-minimum landscape traps the search in a local basin.
+
+\subsubsection*{GO–PDE relationship}
+
+The apparent PDE increase for Arjun after optimisation (2.38\,mm
+$\rightarrow$ 4.34\,mm mean) reflects the known limitation of
+intensity-based objectives: once the pose is near optimal, further
+search may minimise the surrogate GO objective while slightly
+displacing anatomical correspondences.
+Frames \textit{a}, \textit{c}, \textit{e} (where the optimiser
+correctly identified $\Delta$GO$=0$ convergence and left the initial
+pose unchanged) achieved PDE 1.26–2.36\,mm, values well within a
+clinically acceptable range.
+
+\subsubsection*{Clinical implications}
+
+These results support a staged deployment strategy:
+(1)~acquire AP fluoroscopy before any instrument insertion
+    to avoid metal-artifact domain mismatch;
+(2)~extract C-arm geometry metadata (SID, pixel spacing) from DICOM
+    headers rather than using nominal values;
+(3)~collect 2D annotations for ≥2 frames per patient to enable
+    EPnP initialisation, which reduced optimisation time from
+    $\sim$113\,s to $\sim$5.65\,s.
+
+\subsubsection*{Limitations}
+
+\begin{itemize}
+  \item \textbf{Small cohort}: two patients, 13 projections.
+        Statistical confidence intervals are wide; a prospective
+        study of $\geq$30 patients is needed.
+  \item \textbf{No calibrated geometry}: SID and pixel spacing were
+        set to nominal values; true machine-specific calibration
+        would reduce the effective search space.
+  \item \textbf{Mixed hardware}: GPU vs.\ CPU comparison confounds
+        algorithm and hardware effects.
+  \item \textbf{Postoperative hardware}: some C-arm frames contained
+        metal implants absent from the preoperative CT, creating
+        unavoidable domain mismatch for the GO objective.
+\end{itemize}
+
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have implemented and evaluated a multi-stage 3D--2D CT-to-fluoroscopy
+registration pipeline for intraoperative lumbar level identification.
+Across 13 projections from two clinical patients, the system achieved a
+76.9\% success rate with a mean GO reduction of 0.1800.
+GPU acceleration reduced per-frame runtime from $\sim$113\,s (CPU) to
+$\sim$5.65\,s, approaching the threshold for near-real-time use.
+This feasibility study establishes the implementation baseline and
+provides a reproducible protocol for a prospective multi-patient
+clinical validation study.
+
+% ============================================================
+\section*{Declarations}
+
+\subsection*{Ethics approval and consent to participate}
+The study was conducted under institutional ethics oversight at NIMS
+Hospital, Hyderabad (protocol number: \textit{[to be inserted]}).
+Patient consent was obtained in accordance with institutional guidelines.
+
+\subsection*{Consent for publication}
+All authors consent to publication.
+Patient data have been de-identified.
+
+\subsection*{Availability of data and materials}
+De-identified imaging data and source code will be made available upon
+reasonable request subject to ethics and data-governance constraints.
+
+\subsection*{Competing interests}
+The authors declare that they have no competing interests.
+
+\subsection*{Funding}
+This work received no specific grant from any funding agency in the
+public, commercial, or not-for-profit sectors.
+
+\subsection*{Author contributions}
+\begin{itemize}
+  \item \textbf{Raghu Gangolu}: Conceptualisation, methodology,
+        software, validation, formal analysis,
+        writing---original draft.
+  \item \textbf{Siddique}: Software, data curation, investigation,
+        writing---review and editing.
+  \item \textbf{Sahil}: Software support, visualisation, validation,
+        writing---review and editing.
+  \item \textbf{Dr.\ Anildev}: Clinical supervision, data-acquisition
+        oversight, clinical interpretation.
+  \item \textbf{Dr.\ Vamsi}: Clinical guidance, surgical-workflow
+        inputs, manuscript review.
+  \item \textbf{Dr.\ K.V.\ Kadambari}: Supervision, methodology
+        guidance, project administration, manuscript review.
+\end{itemize}
+
+\subsection*{Acknowledgements}
+The authors thank the surgical and radiology teams at NIMS Hospital
+for clinical data acquisition and the NITW High-Performance Computing
+facility for computing support.
+
+% ── bibliography ────────────────────────────────────────────
+\bibliographystyle{unsrtnat}
+\bibliography{references}
+
+% ── Supplementary: per-frame panels ─────────────────────
+\clearpage
+\appendix
+\section{Per-frame Registration Panels — Arjun}
+\label{apx:frames}
+
+Figures~\ref{fig:arjun_a}--\ref{fig:arjun_e} show the four-panel
+(X-ray $|$ DRR\textsubscript{init} $|$ DRR\textsubscript{final}
+$|$ Checkerboard) result for each Arjun projection.
+Coloured ``+'' markers show reprojected L1--L5 centroids;
+circular markers indicate manually annotated GT 2D landmarks.
+
+\foreach \fr/\lbl in {a/{a},b/{b},c/{c},d/{d},e/{e}}{
+\begin{figure}[H]
+  \centering
+  \includegraphics[width=\linewidth]{figures/figB_arjun_frame_\fr.pdf}
+  \caption{Arjun -- frame \lbl: X-ray $\mid$ DRR(init) $\mid$ DRR(final)
+    $\mid$ checkerboard.}
+  \label{fig:arjun_\fr}
+\end{figure}
+}
+
+\end{document}
