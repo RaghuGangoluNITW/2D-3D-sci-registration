@@ -3,11 +3,22 @@ deformable_registration.py
 ==========================
 Per-vertebra deformable refinement for 2D/3D spine registration.
 
-After a global rigid pose (R, t) is found (EPnP + CMA-ES), each vertebra
-is treated independently.  A closed-form backprojection finds the 3D
-position on the camera ray through the observed 2D centroid that is
-closest to the CT centroid.  The difference is the deformation vector —
-the amount the vertebra moved between the preop CT and the intraop position.
+Two strategies are provided:
+
+  1. compute_deformation()        — fast closed-form backprojection (original).
+     After a global rigid pose (R, t) is found, each vertebra's 3D position
+     is corrected via backprojection of its observed 2D centroid.
+
+  2. compute_deformation_cmaes()  — full per-vertebra CMA-ES (Ketcha 2017b).
+     For each labeled vertebra, a small independent CMA-ES is run starting
+     from the global rigid pose, optimising DRR similarity in a local ROI
+     around that vertebra.  This finds the true best pose per vertebra rather
+     than inferring it geometrically — critical for patients with large prone/
+     supine changes or scoliosis (>10° curvature change).
+
+     Expected benefit (from Ketcha 2017b):
+       rigid LevelCheck: max PDE 22.4 mm under strong deformation
+       per-vertebra CMA-ES: max PDE 3.9 mm  (same deformation)
 
 Coordinate convention (must match generic_patient_loader.py)
 ============================================================
@@ -16,19 +27,6 @@ Forward projection:
     u = FX * P_cam[0] / P_cam[2] + CX
     v = FY * P_cam[1] / P_cam[2] + CY
 where xzy(p) swaps indices 1 and 2:  [x,y,z] → [x,z,y]
-
-Backprojection (derived from above):
-    Camera centre in world:  C = xzy(-R^T @ t)
-    Ray direction from pixel (u,v):
-        d_cam  = [(u-CX)/FX, (v-CY)/FY, 1.0]   (camera space)
-        d_world = xzy(R^T @ d_cam / |d_cam|)      (world space, unit)
-    Point on ray: r(λ) = C + λ * d_world,  λ > 0
-    Closest point to CT centroid p3d:
-        λ*    = dot(p3d - C, d_world)
-        p3d'  = C + λ* * d_world                  (deformed position)
-        Δ     = p3d' - p3d                         (deformation vector)
-
-Biomechanical constraint: |Δ| ≤ MAX_DEFORM_MM (default 15 mm)
 """
 
 from typing import Dict, List, Optional, Tuple
@@ -290,3 +288,179 @@ def cross_view_consistency(
         dz_lat = deformations_lat[name].delta_mm[2]
         consistency[name] = abs(float(dz_ap) - float(dz_lat))
     return consistency
+
+
+# ---------------------------------------------------------------------------
+# Per-vertebra CMA-ES deformation  (Ketcha 2017b)
+# ---------------------------------------------------------------------------
+def compute_deformation_cmaes(
+    R_global: np.ndarray,
+    t_global: np.ndarray,
+    pts3d: np.ndarray,
+    lm_names: List[str],
+    gt_2d_pixels: Dict[str, np.ndarray],
+    drr_generator,               # DeepFluoroDRR instance
+    xray_image: np.ndarray,      # full-resolution X-ray (H, W) float32
+    fx: float, fy: float,
+    cx: float, cy: float,
+    pix_mm: float = 0.2,
+    max_deform_mm: float = MAX_DEFORM_MM,
+    roi_px: int = 180,           # half-side of the ROI window in pixels
+    render_size: int = 64,       # DRR render size for per-vertebra opt
+    n_starts: int = 6,           # CMA-ES restarts per vertebra
+    max_rot_deg: float = 5.0,    # search range ± rotation (degrees)
+    max_trans_mm: float = 12.0,  # search range ± translation (mm)
+    verbose: bool = False,
+) -> Dict[str, VertebralDeformation]:
+    """
+    Per-vertebra CMA-ES deformation refinement (Ketcha 2017b).
+
+    For each labeled vertebra:
+      1. Project CT centroid using global pose → approximate pixel location.
+      2. Crop an (roi_px × roi_px) window in the X-ray around that pixel.
+      3. Run a small CMA-ES (6-DOF) starting from the global pose, computing
+         DRR similarity ONLY inside the cropped ROI.  Search bounds are tight
+         (±max_rot_deg, ±max_trans_mm) to stay near the global solution.
+      4. The best local pose is used to backproject the vertebra centroid to
+         its corrected intraop 3D position.
+
+    Compared to the simple geometric backprojection, this finds the true
+    best-fit pose for each vertebra independently, which handles large
+    deformations (scoliosis, prone–supine curvature change) correctly.
+
+    Parameters
+    ----------
+    drr_generator : DeepFluoroDRR instance with generate_from_extrinsic().
+    xray_image    : full-res X-ray used to crop ROI targets.
+    roi_px        : ROI half-width (pixels at native X-ray resolution).
+    render_size   : DRR render resolution for per-vertebra optimisation.
+    n_starts      : number of CMA-ES multi-starts per vertebra.
+    max_rot_deg   : ±rotation search range (degrees).
+    max_trans_mm  : ±translation search range (mm).
+
+    Returns
+    -------
+    dict {name: VertebralDeformation}
+    """
+    # Lazy imports — avoids circular dependency at module load time
+    import sys as _sys, os as _os
+    _sys.path.insert(0, _os.path.dirname(__file__))
+    from optimizer import run_cmaes_single
+    from deepfluoro_loader import perturb_extrinsic
+    import cv2
+
+    H, W = xray_image.shape[:2]
+
+    results: Dict[str, VertebralDeformation] = {}
+
+    for i, name in enumerate(lm_names):
+        if name not in gt_2d_pixels:
+            continue
+
+        p3d   = np.asarray(pts3d[i], dtype=np.float64)
+        uv_gt = gt_2d_pixels[name]
+        u_gt, v_gt = float(uv_gt[0]), float(uv_gt[1])
+
+        # ── Step 1: build ROI target from X-ray ──────────────────────────
+        u0 = int(np.clip(u_gt - roi_px, 0, W - 1))
+        u1 = int(np.clip(u_gt + roi_px, 0, W))
+        v0 = int(np.clip(v_gt - roi_px, 0, H - 1))
+        v1 = int(np.clip(v_gt + roi_px, 0, H))
+        roi_xray = xray_image[v0:v1, u0:u1].astype(np.float32)
+
+        # Fall back to geometric backprojection if ROI is too small
+        def _backproj_fallback():
+            C, d_hat = _backproject_ray(R_global, t_global,
+                                        u_gt, v_gt, fx, fy, cx, cy)
+            p3d_def = _closest_point_on_ray(C, d_hat, p3d)
+            delta   = p3d_def - p3d
+            mag     = float(np.linalg.norm(delta))
+            clamped = mag > max_deform_mm
+            if clamped:
+                delta = delta * (max_deform_mm / mag)
+                p3d_def = p3d + delta
+            return VertebralDeformation(
+                label=name, p3d_ct=p3d.copy(), p3d_intraop=p3d_def,
+                delta_mm=delta, clamped=clamped)
+
+        if roi_xray.size < 100:
+            results[name] = _backproj_fallback()
+            continue
+
+        roi_tgt = cv2.resize(roi_xray, (render_size, render_size),
+                             interpolation=cv2.INTER_AREA)
+
+        # Compute approximate mm/px at render resolution
+        render_pix_mm = pix_mm * (max(H, W) / render_size)
+        # Scale factor: roi in render coords
+        sc = render_size * 4 / max(H, W)
+        du0, du1 = int(u0 * sc), int(u1 * sc)
+        dv0, dv1 = int(v0 * sc), int(v1 * sc)
+
+        # ── Step 2: per-vertebra cost function ───────────────────────────
+        def _cost(x, _R=R_global, _t=t_global, _tgt=roi_tgt,
+                  _du0=du0, _du1=du1, _dv0=dv0, _dv1=dv1,
+                  _rpx=render_pix_mm, _rn=render_size * 4):
+            Rc, tc = perturb_extrinsic(_R, _t, x[:3], x[3:])
+            try:
+                drr_full = drr_generator.generate_from_extrinsic(
+                    Rc, tc, _rn, _rpx / 4, 40)
+            except Exception:
+                return 1.0
+            drr_roi = drr_full[_dv0:_dv1, _du0:_du1]
+            if drr_roi.size < 4:
+                return 1.0
+            drr_rs = cv2.resize(drr_roi.astype(np.float32),
+                                (render_size, render_size),
+                                interpolation=cv2.INTER_AREA)
+            if np.count_nonzero(drr_rs > 0.01) / drr_rs.size < 0.05:
+                return 1.0
+            m1, m2 = drr_rs.mean(), _tgt.mean()
+            s1, s2 = drr_rs.std(),  _tgt.std()
+            if s1 < 1e-8 or s2 < 1e-8:
+                return 1.0
+            ncc = ((drr_rs - m1) * (_tgt - m2)).mean() / (s1 * s2)
+            return float(1.0 - max(-1.0, min(1.0, ncc)))
+
+        # ── Step 3: multi-start CMA-ES ────────────────────────────────────
+        rot_rad = float(np.deg2rad(max_rot_deg))
+        sigma_r = np.array([rot_rad, rot_rad, rot_rad,
+                            max_trans_mm, max_trans_mm, max_trans_mm])
+
+        best_cost = float('inf')
+        best_x    = np.zeros(6)
+
+        rng = np.random.default_rng()
+        for _ in range(n_starts):
+            x0 = rng.uniform(-0.3, 0.3, 6) * sigma_r
+            try:
+                res = run_cmaes_single(_cost, x0, sigma_r / 3.0,
+                                       bounds_center=np.zeros(6),
+                                       popsize=8, tolx=0.05, maxiter=150)
+                if res.cost < best_cost:
+                    best_cost = res.cost
+                    best_x    = res.pose.copy()
+            except Exception:
+                pass
+
+        # ── Step 4: backproject from refined pose ─────────────────────────
+        R_loc, t_loc = perturb_extrinsic(R_global, t_global,
+                                         best_x[:3], best_x[3:])
+        C, d_hat = _backproject_ray(R_loc, t_loc, u_gt, v_gt, fx, fy, cx, cy)
+        p3d_def  = _closest_point_on_ray(C, d_hat, p3d)
+        delta    = p3d_def - p3d
+        mag      = float(np.linalg.norm(delta))
+        clamped  = mag > max_deform_mm
+        if clamped:
+            delta   = delta * (max_deform_mm / mag)
+            p3d_def = p3d + delta
+
+        if verbose:
+            print(f"    [{name}] cost={best_cost:.4f}  "
+                  f"deform={mag:.1f}mm {'(clamped)' if clamped else ''}")
+
+        results[name] = VertebralDeformation(
+            label=name, p3d_ct=p3d.copy(), p3d_intraop=p3d_def,
+            delta_mm=delta, clamped=clamped)
+
+    return results

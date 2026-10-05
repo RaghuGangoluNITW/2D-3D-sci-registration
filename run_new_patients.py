@@ -29,6 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
+import torch
 
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
@@ -37,7 +38,10 @@ from generic_patient_loader import (
     GenericProjection,
     compute_pde,
     project_world,
-    CAM_SID_MM, CAM_PIX_MM, CAM_FX, CAM_FY, CAM_CX, CAM_CY, CAM_IMG_SIZE,
+    _solve_pnp,
+    _reproj_err,
+    _anatomy_pose,
+    CAM_SID_MM, CAM_PIX_MM, CAM_FX, CAM_FY, CAM_CX, CAM_CY, CAM_IMG_SIZE, CAM_K,
 )
 from deepfluoro_loader import DeepFluoroSpecimen, perturb_extrinsic
 from deepfluoro_drr import DeepFluoroDRR
@@ -45,14 +49,15 @@ from similarity import go_cost as compute_go_cost, normalized_cross_correlation
 from optimizer import run_cmaes_single
 from deformable_registration import (
     compute_deformation,
+    compute_deformation_cmaes,
     deformable_pde as compute_deformable_pde,
 )
 
 # ---------------------------------------------------------------------------
 # Data root
 # ---------------------------------------------------------------------------
-NEW_DATA_ROOT = Path('data/ProcessedData/Processed Data 2D-3D')
-RESULTS_ROOT  = Path('results/newdata')
+NEW_DATA_ROOT = Path('data/patients')
+RESULTS_ROOT  = Path('results')
 
 # ---------------------------------------------------------------------------
 # Render sizes
@@ -158,8 +163,21 @@ def make_overlay_image(
 # ---------------------------------------------------------------------------
 # Objectives
 # ---------------------------------------------------------------------------
-def _make_objectives(drr_gen, R_gt, t_gt, proj, specimen):
+def _make_objectives(drr_gen, R_gt, t_gt, proj, specimen, lm_weight_scale=1.0):
+    from metal_suppression import suppress_metal
     xray = proj.image_raw
+
+    # Compute metal mask once — reused in every cost function call
+    _, metal_mask = suppress_metal(xray)
+    # Resize masks to each rendering resolution
+    def _resize_mask(sz):
+        if metal_mask.max() == 0:
+            return None   # no metal detected — skip masking
+        return cv2.resize(metal_mask, (sz, sz), interpolation=cv2.INTER_NEAREST)
+    mmask_c = _resize_mask(COARSE_SIZE)
+    mmask_o = _resize_mask(OPT_SIZE)
+    mmask_f = _resize_mask(FINE_SIZE)
+
     tgt_c = cv2.resize(xray, (COARSE_SIZE, COARSE_SIZE), interpolation=cv2.INTER_AREA)
     tgt_o = cv2.resize(xray, (OPT_SIZE,    OPT_SIZE),    interpolation=cv2.INTER_AREA)
     tgt_f = cv2.resize(xray, (FINE_SIZE,   FINE_SIZE),   interpolation=cv2.INTER_AREA)
@@ -177,29 +195,30 @@ def _make_objectives(drr_gen, R_gt, t_gt, proj, specimen):
         uv = project_world(pts3d_ann, R, t)
         return float(np.clip(np.mean(np.linalg.norm(uv - pts2d_ann, axis=1)) / diag, 0, 1))
 
-    def _ncc(drr, tgt):
+    def _ncc(drr, tgt, mmask=None):
         if np.count_nonzero(drr > 0.01) / drr.size < 0.08: return 1.0
-        return float(1.0 - normalized_cross_correlation(1.0 - drr, tgt))
+        return float(1.0 - normalized_cross_correlation(1.0 - drr, tgt, metal_mask=mmask))
 
-    def _ng(drr, tgt):
+    def _ng(drr, tgt, mmask=None):
         if np.count_nonzero(drr > 0.01) / drr.size < 0.08: return 1.0
-        return 0.5 * float(1.0 - normalized_cross_correlation(1.0 - drr, tgt)) \
-             + 0.5 * float(compute_go_cost(drr, tgt))
+        return 0.5 * float(1.0 - normalized_cross_correlation(1.0 - drr, tgt, metal_mask=mmask)) \
+             + 0.5 * float(compute_go_cost(drr, tgt, metal_mask=mmask))
 
-    def obj(cf, tgt, sz, px, ns, lw):
+    def obj(cf, tgt, sz, px, ns, lw, mmask):
         def f(x):
             Rc, tc = perturb_extrinsic(R_gt, t_gt, x[:3], x[3:])
             d = drr_gen.generate_from_extrinsic(Rc, tc, sz, px, ns)
-            return (1 - lw) * cf(d, tgt) + lw * _lm(Rc, tc)
+            return (1 - lw) * cf(d, tgt, mmask) + lw * _lm(Rc, tc)
         return f
 
-    oc = obj(_ncc, tgt_c, COARSE_SIZE, COARSE_PIX, 40,  0.4)
-    op = obj(_ng,  tgt_o, OPT_SIZE,    OPT_PIX,    80,  0.3)
-    of = obj(_ncc, tgt_f, FINE_SIZE,   FINE_PIX,   120, 0.2)
+    lws = lm_weight_scale
+    oc = obj(_ncc, tgt_c, COARSE_SIZE, COARSE_PIX, 40,  0.4*lws, mmask_c)
+    op = obj(_ng,  tgt_o, OPT_SIZE,    OPT_PIX,    80,  0.3*lws, mmask_o)
+    of = obj(_ncc, tgt_f, FINE_SIZE,   FINE_PIX,   120, 0.2*lws, mmask_f)
 
     def go_eval(R, t):
         d = drr_gen.generate_from_extrinsic(R, t, OPT_SIZE, OPT_PIX, 80)
-        return float(compute_go_cost(d, tgt_o))
+        return float(compute_go_cost(d, tgt_o, metal_mask=mmask_o))
 
     return oc, op, of, go_eval
 
@@ -210,7 +229,9 @@ def _make_objectives(drr_gen, R_gt, t_gt, proj, specimen):
 def run_registration(drr_gen, proj: GenericProjection,
                      specimen: DeepFluoroSpecimen,
                      rot_deg=10.0, trans_mm=20.0,
-                     n_starts=16, verbose=False) -> dict:
+                     n_starts=16, verbose=False,
+                     deform_cmaes=False,
+                     lm_weight_scale=1.0) -> dict:
 
     R_gt = proj.R_proj.copy()
     t_gt = proj.t_proj.copy()
@@ -220,7 +241,7 @@ def run_registration(drr_gen, proj: GenericProjection,
     pde_init = compute_pde(proj, R_gt, t_gt, pts3d, lm_names)
     init_pde_mean = float(np.mean(list(pde_init.values()))) if pde_init else float('nan')
 
-    oc, op, of, go_eval = _make_objectives(drr_gen, R_gt, t_gt, proj, specimen)
+    oc, op, of, go_eval = _make_objectives(drr_gen, R_gt, t_gt, proj, specimen, lm_weight_scale=lm_weight_scale)
     init_go = go_eval(R_gt, t_gt)
 
     if verbose: print(f"    init PDE={init_pde_mean:.2f}mm  GO={init_go:.4f}")
@@ -263,13 +284,25 @@ def run_registration(drr_gen, proj: GenericProjection,
     # the final rigid camera pose to find its corrected 3D intraop position.
     # The offset (deformation vector) quantifies per-vertebra spinal deformation
     # between preop CT and intraop position.
-    deformations = compute_deformation(
-        R_fin, t_fin,
-        pts3d, lm_names,
-        proj.gt_landmarks_2d,
-        CAM_FX, CAM_FY, CAM_CX, CAM_CY,
-        pix_mm=CAM_PIX_MM,
-    )
+    if deform_cmaes and hasattr(proj, 'drr_generator') and proj.drr_generator is not None:
+        deformations = compute_deformation_cmaes(
+            R_fin, t_fin,
+            pts3d, lm_names,
+            proj.gt_landmarks_2d,
+            drr_generator=proj.drr_generator,
+            xray_image=proj.image_raw,
+            fx=CAM_FX, fy=CAM_FY, cx=CAM_CX, cy=CAM_CY,
+            pix_mm=CAM_PIX_MM,
+            verbose=verbose,
+        )
+    else:
+        deformations = compute_deformation(
+            R_fin, t_fin,
+            pts3d, lm_names,
+            proj.gt_landmarks_2d,
+            CAM_FX, CAM_FY, CAM_CX, CAM_CY,
+            pix_mm=CAM_PIX_MM,
+        )
     deform_pde_dict = compute_deformable_pde(
         R_fin, t_fin,
         deformations,
@@ -324,6 +357,67 @@ def parse_args():
     p.add_argument('--trans',   type=float, default=20.0)
     p.add_argument('--starts',  type=int,   default=16)
     p.add_argument('--min_labels', type=int, default=3)
+    p.add_argument('--camera',  type=str,   default='ziehm_vision_fd',
+                   help='Camera config name from configs/cameras/. '
+                        'Default: ziehm_vision_fd. '
+                        'Other options: siemens_cios_spin, ge_oec_9900')
+    p.add_argument('--deform_cmaes', action='store_true',
+                   help='Use per-vertebra CMA-ES deformation (Ketcha 2017b) '
+                        'instead of geometric backprojection.')
+    p.add_argument('--auto_landmarks', action='store_true',
+                   help='Use the trained CNN to predict 2D landmarks instead of '
+                        'reading CENTROID.mrk.json. Falls back to file labels '
+                        'if detector confidence is low.')
+    p.add_argument('--lm_conf', type=float, default=0.15,
+                   help='Min heatmap confidence to accept a CNN prediction (default 0.15).')
+    p.add_argument('--ssm_landmarks', action='store_true',
+                   help='Use SSM mean shape (no CNN) to initialise 2D landmarks. '
+                        'Works fully annotation-free: mean spine centred on image.')
+    p.add_argument('--ssm_reg', action='store_true',
+                   help='Use trained SSM regressor to predict 2D landmarks. '
+                        'Fully annotation-free: CNN regresses 8 SSM params per image.')
+    p.add_argument('--ssm_path', type=str, default=None,
+                   help='Path to SSM .pkl used by --ssm_reg (default: spine_ssm_buu.pkl if exists, else spine_ssm.pkl).')
+    p.add_argument('--ckpt_dir', type=str, default=None,
+                   help='Checkpoint directory for SSM regressor AP folds '
+                        '(default: checkpoints/ssm_regressor_ap/). '
+                        'Use --lat_ckpt_dir to set the LAT directory separately.')
+    p.add_argument('--lat_ckpt_dir', type=str, default=None,
+                   help='Checkpoint directory for SSM regressor LAT folds '
+                        '(default: checkpoints/ssm_regressor_lat/).')
+    p.add_argument('--heatmap_reg', action='store_true',
+                   help='Use the trained heatmap-based LandmarkHeatmapNet '
+                        '(scripts/train_landmark_detector.py) to predict raw '
+                        '2D landmark peaks, per-patient/per-view fold '
+                        'checkpoints. Fully annotation-free alternative to '
+                        '--ssm_reg. Uses raw CNN argmax peaks (no SSM '
+                        'completion layer) so this tests the detector itself.')
+    p.add_argument('--heatmap_ckpt_dir', type=str, default=None,
+                   help='Checkpoint directory for heatmap detector AP folds '
+                        '(default: checkpoints/landmark_detector_ap/).')
+    p.add_argument('--heatmap_lat_ckpt_dir', type=str, default=None,
+                   help='Checkpoint directory for heatmap detector LAT folds '
+                        '(default: checkpoints/landmark_detector_lat/).')
+    p.add_argument('--pose_reg', action='store_true',
+                   help='Use the patient-specific direct 6-DOF PoseRegressor '
+                        '(scripts/train_pose_regressor.py, checkpoints/'
+                        'pose_regressor/<PATIENT>.pth) to predict the initial '
+                        'pose directly from the X-ray image -- no 2D '
+                        'landmarks, no EPnP. Built to sidestep the proven '
+                        'EPnP-collinearity instability of --ssm_reg/'
+                        '--heatmap_reg. Requires a checkpoint already trained '
+                        'for this specific patient.')
+    p.add_argument('--pose_reg_ckpt_dir', type=str, default=None,
+                   help='Checkpoint directory for PoseRegressor '
+                        '(default: checkpoints/pose_regressor/).')
+    p.add_argument('--anatomy_pose', action='store_true',
+                   help='Seed the initial pose from a coarse anatomy-based '
+                        'estimate (view-angle heuristic, no CNN landmarks '
+                        'needed) instead of CNN->EPnP. Test of whether a '
+                        'stable-but-coarse start beats an unstable-but-'
+                        'precise-looking EPnP pose from near-collinear '
+                        'vertebral centroids. Overrides --ssm_reg/--heatmap_reg '
+                        'seeding if both are given.')
     p.add_argument('--verbose', action='store_true')
     return p.parse_args()
 
@@ -337,10 +431,50 @@ def main():
     if args.patients:
         patient_dirs = [p for p in patient_dirs if p.name in args.patients]
 
+    from camera_config import load_camera_config, list_cameras
+    cam = load_camera_config(args.camera)
+
+    # Load SSM regressor once if --ssm_reg requested
+    _ssm_reg_detectors = {}  # patient -> SSMRegressorDetector (loaded per-fold lazily)
+    if args.ssm_reg:
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).parent / 'src'))
+            from landmark_detector import SSMRegressorDetector
+            print('  SSM-reg: SSMRegressorDetector ready (fold checkpoints will load per patient)')
+        except Exception as e:
+            print(f'  [WARNING] SSMRegressorDetector load failed: {e}')
+            args.ssm_reg = False
+
+    # Load SSM once if --ssm_landmarks requested
+    _ssm = None
+    if args.ssm_landmarks:
+        try:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).parent / 'src'))
+            from spine_ssm import SpineSSM
+            _ssm_path = Path(__file__).parent / 'checkpoints' / 'spine_ssm.pkl'
+            _ssm = SpineSSM.load(str(_ssm_path))
+            print(f'  SSM-landmarks: loaded {_ssm_path.name}  ({_ssm.n_modes} modes)')
+        except Exception as e:
+            print(f'  [WARNING] SSM load failed: {e}  — falling back to file labels.')
+
+    # Load landmark detector once if requested
+    _detector = None
+    if args.auto_landmarks:
+        try:
+            from landmark_detector import LandmarkDetector
+            _detector = LandmarkDetector(conf_threshold=args.lm_conf)
+            print(f'  Auto-landmarks: CNN detector loaded (conf≥{args.lm_conf})')
+        except FileNotFoundError as e:
+            print(f'  [WARNING] {e}')
+            print('  Falling back to CENTROID.mrk.json labels for all sets.')
+
     print(f"\n{'='*65}")
     print(f"  NEW PATIENT PIPELINE  —  {len(patient_dirs)} patients")
-    print(f"  Data: {NEW_DATA_ROOT}")
-    print(f"  Out : {RESULTS_ROOT}")
+    print(f"  Data  : {NEW_DATA_ROOT}")
+    print(f"  Out   : {RESULTS_ROOT}")
+    print(f"  Camera: {cam}")
     print(f"{'='*65}")
 
     all_patient_results = {}
@@ -356,7 +490,7 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            loader = GenericPatientLoader(patient_dir)
+            loader = GenericPatientLoader(patient_dir, camera=args.camera)
             spec   = loader.load(min_labels=args.min_labels, verbose=True)
         except Exception as e:
             print(f"  ❌ Load failed: {e}")
@@ -377,12 +511,347 @@ def main():
             continue
 
         patient_results = []
+
+        # ── SSM regressor landmark prediction (Option A) ──────────────────
+        # Uses VIEW-SPECIFIC SSM + checkpoint per projection (AP vs LAT),
+        # since a single mixed AP+LAT SSM/regressor was found to corrupt the
+        # mean_scale calibration (see checkpoints/spine_ssm_ap.pkl vs
+        # spine_ssm_lat.pkl, built to fix this). proj.proj_key (the set
+        # name, e.g. 'AP-SET-1' / 'LAT-SET-1') is used to pick the view.
+        #
+        # IMPORTANT: this computes a genuine CNN-seeded initial pose via
+        # EPnP on the CNN's 2D predictions, and overwrites proj.R_proj /
+        # proj.t_proj (the anchor pose that run_registration() perturbs
+        # around) with it. proj.gt_landmarks_2d (the TRUE annotated 2D
+        # labels) is left untouched, since compute_pde() always scores
+        # against gt_landmarks_2d regardless of R_proj/t_proj -- this is
+        # what makes init_pde/final_pde a genuine measure of automatic
+        # pipeline accuracy (CNN -> EPnP -> CMA-ES) instead of accidentally
+        # scoring the already-correct file-label pose against itself.
+        if args.ssm_reg:
+            try:
+                from landmark_detector import SSMRegressorDetector
+
+                def _load_detector(view: str) -> Optional['SSMRegressorDetector']:
+                    """Load the view-specific SSM regressor for this patient,
+                    or None if no fold checkpoint exists for this patient+view."""
+                    default_dir = (Path(__file__).parent / 'checkpoints' /
+                                   f'ssm_regressor_{view.lower()}')
+                    override = args.ckpt_dir if view == 'AP' else args.lat_ckpt_dir
+                    ckpt_dir = Path(override) if override else default_dir
+                    if not ckpt_dir.is_absolute():
+                        ckpt_dir = Path(__file__).parent / ckpt_dir
+                    fold_ckpt = ckpt_dir / f'fold_{pid}.pth'
+                    if not fold_ckpt.exists():
+                        return None
+                    default_ssm = (Path(__file__).parent / 'checkpoints' /
+                                   f'spine_ssm_{view.lower()}.pkl')
+                    ssm_path = args.ssm_path or (str(default_ssm) if default_ssm.exists() else None)
+                    return SSMRegressorDetector(
+                        checkpoint=str(fold_ckpt), ssm_path=ssm_path,
+                        patient=pid, view=view, device='cuda')
+
+                _detectors_by_view = {}
+                n_seeded  = 0
+                n_skipped = 0
+                for proj in spec.projections:
+                    view = 'AP' if 'AP' in proj.proj_key.upper() else 'LAT'
+                    if view not in _detectors_by_view:
+                        try:
+                            _detectors_by_view[view] = _load_detector(view)
+                        except Exception as e:
+                            print(f'  [WARNING] SSM-reg: failed to load {view} '
+                                  f'detector for {pid}: {e}')
+                            _detectors_by_view[view] = None
+                    det_ssm = _detectors_by_view[view]
+                    if det_ssm is None:
+                        print(f'    {proj.proj_key}: no {view} fold checkpoint '
+                              f'for {pid} — keeping file-label EPnP anchor')
+                        n_skipped += 1
+                        continue
+                    try:
+                        pred, _ = det_ssm.predict(proj.image_raw, return_conf=True)
+                        # Solve EPnP from the CNN's 2D guesses + known 3D
+                        # centroids -- this is the actual "automatic" initial
+                        # pose a real deployment would compute, since no
+                        # manual/true 2D labels are available at inference
+                        # time. gt_landmarks_2d is NOT touched here.
+                        common = sorted(n for n in pred if n in spec.landmarks_3d)
+                        if len(common) >= 3:
+                            pts3d_cnn = np.array([spec.landmarks_3d[n] for n in common])
+                            pts2d_cnn = np.array([pred[n] for n in common])
+                            R_cnn, t_cnn = _solve_pnp(pts3d_cnn, pts2d_cnn, CAM_K)
+                            proj.R_proj = R_cnn
+                            proj.t_proj = t_cnn
+                            proj.reproj_error_px = _reproj_err(
+                                pts3d_cnn, pts2d_cnn, R_cnn, t_cnn)
+                            n_seeded += 1
+                        else:
+                            print(f'    {proj.proj_key}: CNN gave <3 usable '
+                                  f'landmarks ({len(common)}) — cannot seed EPnP, '
+                                  f'keeping file-label anchor')
+                    except Exception as e:
+                        print(f'    {proj.proj_key}: SSM-reg failed ({e})')
+                print(f'  SSM-reg: seeded {n_seeded} CNN->EPnP initial pose(s) '
+                      f'across {len(spec.projections)} projections  '
+                      f'({n_skipped} skipped, no checkpoint)')
+            except Exception as e:
+                print(f'  [WARNING] SSM-reg: {e} — falling back to file-label anchor')
+
+        # ── Heatmap detector landmark prediction (Option B) ────────────────
+        # Same CNN->EPnP seeding pattern as --ssm_reg above, but using raw
+        # LandmarkHeatmapNet argmax peaks (scripts/train_landmark_detector.py)
+        # instead of SSM-parameter regression. No SSM completion layer here
+        # -- only the raw peaks with confidence above --lm_conf are used, so
+        # this measures the heatmap detector itself, matching how it was
+        # evaluated during training (evaluate() in the training script).
+        if args.heatmap_reg:
+            try:
+                from landmark_model import LandmarkHeatmapNet
+                from landmark_dataset import CLASS_NAMES, HMAP_SIZE
+
+                def _load_heatmap_detector(view: str):
+                    default_dir = (Path(__file__).parent / 'checkpoints' /
+                                   f'landmark_detector_{view.lower()}')
+                    override = (args.heatmap_ckpt_dir if view == 'AP'
+                               else args.heatmap_lat_ckpt_dir)
+                    ckpt_dir = Path(override) if override else default_dir
+                    if not ckpt_dir.is_absolute():
+                        ckpt_dir = Path(__file__).parent / ckpt_dir
+                    fold_ckpt = ckpt_dir / f'fold_{pid}.pth'
+                    if not fold_ckpt.exists():
+                        return None
+                    ckpt = torch.load(str(fold_ckpt), map_location='cuda',
+                                      weights_only=False)
+                    m = LandmarkHeatmapNet(pretrained=False, dropout=0.0).to('cuda')
+                    m.load_state_dict(ckpt['model_state'])
+                    m.eval()
+                    val_err = ckpt.get('val_err_mm', float('nan'))
+                    print(f'  [HeatmapDetector] {fold_ckpt.name}  '
+                          f'(val_err={val_err:.1f}mm)')
+                    return m
+
+                @torch.no_grad()
+                def _predict_heatmap(m, xray):
+                    orig_h, orig_w = xray.shape[:2]
+                    img = xray.astype(np.float32)
+                    lo, hi = img.min(), img.max()
+                    if hi > lo:
+                        img = (img - lo) / (hi - lo)
+                    img_u8 = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+                    img = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(
+                        img_u8).astype(np.float32) / 255.0
+                    img_rs = cv2.resize(img, (512, 512), interpolation=cv2.INTER_LINEAR)
+                    t = torch.from_numpy(img_rs).unsqueeze(0).unsqueeze(0).to('cuda')
+                    logits = m(t)
+                    hmap = logits.sigmoid()[0].cpu().numpy()
+                    sx, sy = orig_w / HMAP_SIZE, orig_h / HMAP_SIZE
+                    coords, confs = {}, {}
+                    for i, name in enumerate(CLASS_NAMES):
+                        ch = hmap[i]
+                        peak = float(ch.max())
+                        confs[name] = peak
+                        if peak < args.lm_conf:
+                            continue
+                        flat_idx = int(ch.argmax())
+                        hx = (flat_idx % HMAP_SIZE + 0.5) * sx
+                        hy = (flat_idx // HMAP_SIZE + 0.5) * sy
+                        coords[name] = np.array([hx, hy], dtype=np.float64)
+                    return coords, confs
+
+                _hm_detectors_by_view = {}
+                n_seeded  = 0
+                n_skipped = 0
+                for proj in spec.projections:
+                    view = 'AP' if 'AP' in proj.proj_key.upper() else 'LAT'
+                    if view not in _hm_detectors_by_view:
+                        try:
+                            _hm_detectors_by_view[view] = _load_heatmap_detector(view)
+                        except Exception as e:
+                            print(f'  [WARNING] heatmap-reg: failed to load {view} '
+                                  f'detector for {pid}: {e}')
+                            _hm_detectors_by_view[view] = None
+                    m = _hm_detectors_by_view[view]
+                    if m is None:
+                        print(f'    {proj.proj_key}: no {view} fold checkpoint '
+                              f'for {pid} — keeping file-label EPnP anchor')
+                        n_skipped += 1
+                        continue
+                    try:
+                        pred, confs = _predict_heatmap(m, proj.image_raw)
+                        common = sorted(n for n in pred if n in spec.landmarks_3d)
+                        if len(common) >= 3:
+                            pts3d_cnn = np.array([spec.landmarks_3d[n] for n in common])
+                            pts2d_cnn = np.array([pred[n] for n in common])
+                            R_cnn, t_cnn = _solve_pnp(pts3d_cnn, pts2d_cnn, CAM_K)
+                            proj.R_proj = R_cnn
+                            proj.t_proj = t_cnn
+                            proj.reproj_error_px = _reproj_err(
+                                pts3d_cnn, pts2d_cnn, R_cnn, t_cnn)
+                            n_seeded += 1
+                            if args.verbose:
+                                conf_str = '  '.join(
+                                    f'{k}={confs.get(k,0):.2f}' for k in pred)
+                                print(f'    {proj.proj_key}: heatmap-reg '
+                                      f'({len(pred)} peaks above conf) [{conf_str}]')
+                        else:
+                            print(f'    {proj.proj_key}: heatmap detector gave <3 '
+                                  f'confident landmarks ({len(common)}) — cannot '
+                                  f'seed EPnP, keeping file-label anchor')
+                    except Exception as e:
+                        print(f'    {proj.proj_key}: heatmap-reg failed ({e})')
+                print(f'  heatmap-reg: seeded {n_seeded} CNN->EPnP initial pose(s) '
+                      f'across {len(spec.projections)} projections  '
+                      f'({n_skipped} skipped, no checkpoint)')
+            except Exception as e:
+                print(f'  [WARNING] heatmap-reg: {e} — falling back to file-label anchor')
+
+        # ── Direct pose regression (Option E) ──────────────────────────────
+        # Patient-specific 6-DOF PoseRegressor (src/pose_regressor.py):
+        # predicts a pose PERTURBATION directly from the image, relative to
+        # the same anatomy-pose reference frame used during training
+        # (see scripts/train_pose_regressor.py -- VIEW_AZIMUTHS/
+        # _anatomy_pose_random, which is numerically identical to
+        # generic_patient_loader._anatomy_pose already imported above).
+        # No 2D landmarks, no EPnP -- this is the approach built to sidestep
+        # the proven EPnP-collinearity instability of --ssm_reg/--heatmap_reg.
+        if args.pose_reg:
+            try:
+                from pose_regressor import PoseRegressor, decode_pose
+
+                def _load_pose_model():
+                    default_dir = Path(__file__).parent / 'checkpoints' / 'pose_regressor'
+                    ckpt_dir = Path(args.pose_reg_ckpt_dir) if args.pose_reg_ckpt_dir else default_dir
+                    if not ckpt_dir.is_absolute():
+                        ckpt_dir = Path(__file__).parent / ckpt_dir
+                    ckpt_path = ckpt_dir / f'{pid}.pth'
+                    if not ckpt_path.exists():
+                        return None
+                    ckpt = torch.load(str(ckpt_path), map_location='cuda', weights_only=False)
+                    m = PoseRegressor(backbone_name=ckpt.get('backbone_name', 'resnet34'),
+                                      pretrained=False).to('cuda')
+                    m.load_state_dict(ckpt['model_state'])
+                    m.eval()
+                    val_pde = ckpt.get('val_pde_mm', float('nan'))
+                    print(f'  [PoseRegressor] {ckpt_path.name}  (val_pde={val_pde:.1f}mm, '
+                          f'synthetic-only)')
+                    return m
+
+                @torch.no_grad()
+                def _predict_pose(m, xray):
+                    img = xray.astype(np.float32)
+                    lo, hi = img.min(), img.max()
+                    if hi > lo:
+                        img = (img - lo) / (hi - lo)
+                    img_u8 = (np.clip(img, 0, 1) * 255).astype(np.uint8)
+                    img = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(
+                        img_u8).astype(np.float32) / 255.0
+                    img_rs = cv2.resize(img, (512, 512), interpolation=cv2.INTER_LINEAR)
+                    t = torch.from_numpy(img_rs).unsqueeze(0).unsqueeze(0).to('cuda')
+                    pred_norm = m(t)[0].cpu().numpy()
+                    return decode_pose(pred_norm)
+
+                pose_model = _load_pose_model()
+                n_seeded = 0
+                if pose_model is None:
+                    print(f'  [WARNING] pose-reg: no checkpoint for {pid} at '
+                          f'checkpoints/pose_regressor/{pid}.pth — falling back '
+                          f'to file-label anchor')
+                else:
+                    for proj in spec.projections:
+                        try:
+                            # decode_pose() now returns the FULL absolute
+                            # (R, t) directly -- no reference-pose delta
+                            # involved (see pose_regressor.py docstring for
+                            # why the earlier delta-from-one-reference
+                            # parameterisation was replaced).
+                            R_pred, t_pred = _predict_pose(pose_model, proj.image_raw)
+                            proj.R_proj = R_pred
+                            proj.t_proj = t_pred
+                            proj.reproj_error_px = float('inf')  # not meaningful (no PnP)
+                            n_seeded += 1
+                            if args.verbose:
+                                print(f'    {proj.proj_key}: pose-reg pred '
+                                      f't={t_pred.round(1)}mm')
+                        except Exception as e:
+                            print(f'    {proj.proj_key}: pose-reg failed ({e})')
+                    print(f'  pose-reg: seeded {n_seeded} direct-pose initial pose(s) '
+                          f'across {len(spec.projections)} projections (no EPnP)')
+            except Exception as e:
+                print(f'  [WARNING] pose-reg: {e} — falling back to file-label anchor')
+
+        # ── Coarse anatomy-pose seeding (Option D) ─────────────────────────
+        # No CNN landmarks needed at all -- uses only the view tag (AP/LAT)
+        # to pick a viewing azimuth and centers the pose on the 3D landmark
+        # centroid. Deliberately coarse/generic, but geometrically STABLE
+        # (does not depend on solving an ill-conditioned PnP from
+        # near-collinear vertebral centroids the way CNN->EPnP does).
+        # Test: does a stable-but-coarse seed let CMA-ES converge better
+        # than an unstable-but-precise-looking CNN->EPnP seed?
+        if args.anatomy_pose:
+            n_seeded = 0
+            for proj in spec.projections:
+                view = 'AP' if 'AP' in proj.proj_key.upper() else 'LAT'
+                az = 0.0 if view == 'AP' else 90.0
+                R_a, t_a = _anatomy_pose(spec.landmarks_3d, az)
+                proj.R_proj = R_a
+                proj.t_proj = t_a
+                proj.reproj_error_px = float('inf')  # not meaningful here
+                n_seeded += 1
+            print(f'  anatomy-pose: seeded {n_seeded} coarse initial pose(s) '
+                  f'across {len(spec.projections)} projections (no CNN)')
+
+        # ── SSM mean-shape landmark initialisation (Option C) ─────────────
+        if args.ssm_landmarks and _ssm is not None:
+            n_ssm_filled = 0
+            for proj in spec.projections:
+                try:
+                    h, w = proj.image_raw.shape[:2]
+                    ssm_lms = _ssm.fit_and_complete({}, img_hw=(h, w))
+                    for name, uv in ssm_lms.items():
+                        proj.gt_landmarks_2d[name] = np.array(uv, dtype=np.float64)
+                        n_ssm_filled += 1
+                except Exception as e:
+                    print(f'    {proj.proj_key}: SSM landmark init failed ({e})')
+            print(f'  SSM-landmarks: set {n_ssm_filled} landmark(s) '
+                  f'across {len(spec.projections)} projections (mean shape)')
+
+        # ── Auto-landmark detection ────────────────────────────────────────
+        if args.auto_landmarks:
+            if _detector is None:
+                print('  [WARNING] --auto_landmarks: detector not loaded, '
+                      'falling back to file labels.')
+            else:
+                n_replaced = 0
+                for proj in spec.projections:
+                    try:
+                        pred, confs = _detector.predict(
+                            proj.image_raw, return_conf=True)
+                        # Replace GT landmarks with CNN predictions where confident
+                        for name, uv in pred.items():
+                            if confs.get(name, 0) >= args.lm_conf:
+                                proj.gt_landmarks_2d[name] = uv
+                                n_replaced += 1
+                        if args.verbose:
+                            conf_str = '  '.join(
+                                f'{k}={confs.get(k,0):.2f}' for k in pred)
+                            print(f'    {proj.proj_key}: CNN landmarks '
+                                  f'({len(pred)} detected) [{conf_str}]')
+                    except Exception as e:
+                        print(f'    {proj.proj_key}: CNN detection failed '
+                              f'({e}), using file labels')
+                if n_replaced:
+                    print(f'  Auto-landmarks: replaced {n_replaced} '
+                          f'landmark(s) with CNN predictions')
+
         for i, proj in enumerate(spec.projections):
             print(f"\n  [{i+1}/{len(spec.projections)}] {proj.proj_key} ...", flush=True)
             t0 = time.time()
             res = run_registration(drr_gen, proj, spec,
                                    rot_deg=args.rot, trans_mm=args.trans,
-                                   n_starts=args.starts, verbose=args.verbose)
+                                   n_starts=args.starts, verbose=args.verbose,
+                                   deform_cmaes=args.deform_cmaes,
+                                   lm_weight_scale=0.0 if (args.ssm_landmarks or args.ssm_reg or args.heatmap_reg or args.anatomy_pose or args.pose_reg) else 1.0)
             res['runtime_s'] = time.time() - t0
 
             print(f"  → PDE: {res['initial_pde_mm']:.2f}→{res['final_pde_mm']:.2f}mm  "
@@ -528,7 +997,7 @@ def main():
     report = '\n'.join(lines)
     print(report)
 
-    (RESULTS_ROOT / 'comparison_table.txt').write_text(report)
+    (RESULTS_ROOT / 'comparison_table.txt').write_text(report, encoding='utf-8')
     print(f"\n  All outputs saved to: {RESULTS_ROOT}/")
     print(f"  Total runtime: {time.time()-t0_global:.1f}s")
 

@@ -1,0 +1,7 @@
+{
+    "name": "Ziehm Vision FD",
+    "sid_mm": 1050.0,
+    "pixel_spacing_mm": 0.288,
+    "image_size_px": 1024,
+    "notes": "Ziehm Vision RFD 3D C-arm (JYOTHI session). SID=1050mm from DICOM tag (0018,1110). Pixel spacing=0.288mm/px from DICOM private tag (0019,1213). Corrected 2026-10-04 from carm_dicom_dump.txt (was wrong default: 1110mm/0.2mm/px)."
+}

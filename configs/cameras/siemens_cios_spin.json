@@ -1,0 +1,7 @@
+{
+    "name": "Siemens Cios Spin",
+    "sid_mm": 1050.0,
+    "pixel_spacing_mm": 0.154,
+    "image_size_px": 1024,
+    "notes": "Siemens Cios Spin mobile C-arm. SID approx 1050mm, pixel spacing 0.154mm/px at 1024px. Verify with calibration phantom."
+}

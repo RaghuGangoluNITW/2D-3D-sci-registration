@@ -1,48 +1,50 @@
-# ── Large medical imaging data (too large for GitHub) ──
-*.nrrd
-*.nii
-*.nii.gz
-*.dcm
-*.mha
-*.mhd
-*.raw
-
-# ── Python ──
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
-.pytest_cache/
+.venv/
 *.egg-info/
+.eggs/
 dist/
 build/
-.eggs/
 
-# ── Jupyter ──
-*.ipynb_checkpoints/
-.ipynb_checkpoints
+# Large binary / model checkpoints — too large for git
+*.pth
+*.pkl
+# Exception: small reference checkpoints explicitly allowed
+!checkpoints/ssm_regressor_ap/fold_SARKHI.pth
+!checkpoints/ssm_regressor_lat/fold_SARKHI.pth
+!checkpoints/spine_ssm_buu.pkl
 
-# ── Virtual environments ──
-.venv/
-venv/
-env/
-.conda/
+# Medical image data — patient privacy + file size
+data/patients/*/CT*/**/*.nrrd
+data/patients/*/XRAY*/**/*.nrrd
+data/buu_lspine/
+*.dcm
 
-# ── IDE ──
-.vscode/
-.idea/
-*.swp
-*.swo
+# Generated synthetic DRR images and converted X-rays — regenerate from scripts
+data/synthetic_drrs/
+data/converted_xrays/
+data/extra_xrays/
+poc/jyothi_data/drr_bank*/
+poc/jyothi_data/converted/
 
-# ── OS ──
+# Log files and debug images
+*.log
+nohup.out
+logs/*.log
+debug_*.png
+debug_*.jpg
+
+# Result images (generated outputs)
+results/
+
+# OS / IDE
 .DS_Store
+.vscode/
+*.swp
 Thumbs.db
 
-# ── Logs & temp ──
-logs/*.log
-logs/*.pid
-nohup.out
-*.tmp
-
-# ── Large result files (keep JSONs and PDF, skip per-patient overlays if needed) ──
-# Uncomment below to also exclude overlay PNGs:
-# results/**/*.png
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb

@@ -41,29 +41,33 @@ from deepfluoro_loader import (
     perturb_extrinsic,
     xzy,
 )
+from camera_config import load_camera_config, CameraConfig, DEFAULT_CAMERA
 
 # ---------------------------------------------------------------------------
-# Camera constants
+# Camera constants  (loaded from configs/cameras/<model>.json)
+# These module-level names are kept for backward compatibility.
+# New code should use a CameraConfig instance directly.
 # ---------------------------------------------------------------------------
-CAM_SID_MM:   float = 1110.0
-CAM_PIX_MM:   float = 0.2
-CAM_IMG_SIZE: int   = 1024
-CAM_FX: float = CAM_SID_MM / CAM_PIX_MM   # 5550 px
-CAM_FY: float = CAM_SID_MM / CAM_PIX_MM
-CAM_CX: float = (CAM_IMG_SIZE - 1) / 2.0
-CAM_CY: float = (CAM_IMG_SIZE - 1) / 2.0
-CAM_K: np.ndarray = np.array([
-    [CAM_FX, 0.,     CAM_CX],
-    [0.,     CAM_FY, CAM_CY],
-    [0.,     0.,     1.    ],
-], dtype=np.float64)
+def _init_cam(name: str = DEFAULT_CAMERA) -> CameraConfig:
+    return load_camera_config(name)
+
+_DEFAULT_CAM = _init_cam()
+
+CAM_SID_MM:   float        = _DEFAULT_CAM.sid_mm
+CAM_PIX_MM:   float        = _DEFAULT_CAM.pixel_spacing_mm
+CAM_IMG_SIZE: int          = _DEFAULT_CAM.image_size_px
+CAM_FX:       float        = _DEFAULT_CAM.fx
+CAM_FY:       float        = _DEFAULT_CAM.fy
+CAM_CX:       float        = _DEFAULT_CAM.cx
+CAM_CY:       float        = _DEFAULT_CAM.cy
+CAM_K:        np.ndarray   = _DEFAULT_CAM.K
 
 
 # ---------------------------------------------------------------------------
 # GenericProjection
 # ---------------------------------------------------------------------------
 class GenericProjection(DeepFluoroProjection):
-    """Generic C-arm projection with fixed 1024×1024 Ziehm intrinsics."""
+    """Generic C-arm projection. Intrinsics default to Ziehm Vision FD."""
     def project(self, pts3d_world: np.ndarray) -> np.ndarray:
         pts = np.atleast_2d(pts3d_world)
         P_cam = (self.R_proj @ xzy(pts).T).T + self.t_proj
@@ -75,24 +79,38 @@ class GenericProjection(DeepFluoroProjection):
 # ---------------------------------------------------------------------------
 # Projection helpers
 # ---------------------------------------------------------------------------
-def project_world(pts3d: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+def project_world(pts3d: np.ndarray, R: np.ndarray, t: np.ndarray,
+                  fx: float = None, fy: float = None,
+                  cx: float = None, cy: float = None) -> np.ndarray:
+    if fx is None: fx = CAM_FX
+    if fy is None: fy = CAM_FY
+    if cx is None: cx = CAM_CX
+    if cy is None: cy = CAM_CY
     pts = np.atleast_2d(pts3d)
     P   = (R @ xzy(pts).T).T + t
-    u   = CAM_FX * P[:, 0] / P[:, 2] + CAM_CX
-    v   = CAM_FY * P[:, 1] / P[:, 2] + CAM_CY
+    u   = fx * P[:, 0] / P[:, 2] + cx
+    v   = fy * P[:, 1] / P[:, 2] + cy
     return np.stack([u, v], axis=1)
 
 
 def compute_pde(proj: GenericProjection,
                 R: np.ndarray, t: np.ndarray,
-                pts3d: np.ndarray, lm_names: List[str]) -> Dict[str, float]:
-    uv = project_world(pts3d, R, t)
+                pts3d: np.ndarray, lm_names: List[str],
+                fx: float = None, fy: float = None,
+                cx: float = None, cy: float = None,
+                pix_mm: float = None) -> Dict[str, float]:
+    if fx is None: fx = CAM_FX
+    if fy is None: fy = CAM_FY
+    if cx is None: cx = CAM_CX
+    if cy is None: cy = CAM_CY
+    if pix_mm is None: pix_mm = CAM_PIX_MM
+    uv = project_world(pts3d, R, t, fx, fy, cx, cy)
     pde: Dict[str, float] = {}
     for i, name in enumerate(lm_names):
         if name in proj.gt_landmarks_2d:
             gt = proj.gt_landmarks_2d[name]
             if 0 <= gt[0] < CAM_IMG_SIZE and 0 <= gt[1] < CAM_IMG_SIZE:
-                pde[name] = float(np.linalg.norm(uv[i] - gt)) * CAM_PIX_MM
+                pde[name] = float(np.linalg.norm(uv[i] - gt)) * pix_mm
     return pde
 
 
@@ -104,6 +122,32 @@ def _load_mrk_3d(path: Path) -> Dict[str, np.ndarray]:
     return {cp['label'].strip(): np.array(cp['position'], dtype=np.float64)
             for cp in d['markups'][0]['controlPoints']
             if cp.get('positionStatus', 'defined') == 'defined'}
+
+
+def _load_extra_pedicle_landmarks(ct_dir: Path) -> Dict[str, np.ndarray]:
+    """
+    Load the auto-extracted, non-collinear pedicle points (see
+    scripts/extract_transverse_process_tips.py), if present for this
+    patient. Returns {} if EXTRA_LANDMARKS.mrk.json is missing (non-fatal
+    -- the pipeline just proceeds with centroids only for that patient).
+
+    These points have NO corresponding 2D ground-truth click on any
+    real X-ray (no new manual labeling was done, per project constraint)
+    -- they exist only in 3D, extracted from the existing CT. They are
+    merged into spec.landmarks_3d so that a CNN's predicted 2D pedicle
+    peaks (see --heatmap_reg in run_new_patients.py) have a matching 3D
+    point to pair with for EPnP, giving EPnP a non-collinear point set
+    instead of vertebra centroids alone (which are nearly collinear
+    along the spine's own axis and were shown to make EPnP unstable --
+    see project history / CLASS_NAMES comment in landmark_dataset.py).
+    """
+    extra_path = ct_dir / 'EXTRA_LANDMARKS.mrk.json'
+    if not extra_path.exists():
+        return {}
+    try:
+        return _load_mrk_3d(extra_path)
+    except Exception:
+        return {}
 
 
 def _load_mrk_2d(path: Path) -> Dict[str, np.ndarray]:
@@ -129,21 +173,29 @@ def _load_nrrd(path: Path) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # EPnP / anatomy pose
 # ---------------------------------------------------------------------------
-def _solve_pnp(pts3d: np.ndarray, pts2d: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _solve_pnp(pts3d: np.ndarray, pts2d: np.ndarray,
+               K: np.ndarray = None) -> Tuple[np.ndarray, np.ndarray]:
+    if K is None:
+        K = CAM_K
     n = len(pts3d)
     flag = cv2.SOLVEPNP_SQPNP if n == 3 else cv2.SOLVEPNP_EPNP
     _, rvec, tvec = cv2.solvePnP(
         xzy(pts3d).astype(np.float64), pts2d.astype(np.float64),
-        CAM_K, np.zeros(4), flags=flag)
+        K, np.zeros(4), flags=flag)
     R, _ = cv2.Rodrigues(rvec)
     return R.astype(np.float64), tvec.flatten().astype(np.float64)
 
 
 def _reproj_err(pts3d: np.ndarray, pts2d: np.ndarray,
-                R: np.ndarray, t: np.ndarray) -> float:
-    uv = project_world(pts3d, R, t)
+                R: np.ndarray, t: np.ndarray,
+                fx: float = None, fy: float = None,
+                cx: float = None, cy: float = None) -> float:
+    if fx is None: fx = CAM_FX
+    if fy is None: fy = CAM_FY
+    if cx is None: cx = CAM_CX
+    if cy is None: cy = CAM_CY
+    uv = project_world(pts3d, R, t, fx, fy, cx, cy)
     return float(np.sqrt(((uv - pts2d)**2).sum(axis=1)).mean())
-
 
 def _anatomy_pose(lm_3d: Dict[str, np.ndarray],
                   azimuth_deg: float) -> Tuple[np.ndarray, np.ndarray]:
@@ -177,11 +229,15 @@ class GenericPatientLoader:
         loader = GenericPatientLoader('/path/to/SARKHI')
         spec   = loader.load()
         spec   = loader.load(min_labels=4)   # only sets with ≥4 common labels
+
+        # Use a different C-arm model:
+        loader = GenericPatientLoader('/path/to/SARKHI', camera='siemens_cios_spin')
     """
 
-    def __init__(self, patient_root: Path):
+    def __init__(self, patient_root: Path, camera: str = DEFAULT_CAMERA):
         self.root   = Path(patient_root)
         self.pid    = self.root.name
+        self.cam    = load_camera_config(camera)
 
     # ── private ──────────────────────────────────────────────────────────────
 
@@ -229,10 +285,16 @@ class GenericPatientLoader:
         lm_3d   = _load_mrk_3d(ct_json)
         # Keep only lumbar labels that exist
         lm_3d = {k: v for k, v in lm_3d.items() if k in LUMBAR | {'D12', 'D11'}}
+        n_centroids = len(lm_3d)
+        # Merge in auto-extracted pedicle points (non-collinear EPnP
+        # correspondences), if this patient has them -- see
+        # scripts/extract_transverse_process_tips.py.
+        lm_3d.update(_load_extra_pedicle_landmarks(ct_json.parent))
+        n_pedicles = len(lm_3d) - n_centroids
         if verbose:
             Z, Y, X = ct_vol.shape
             print(f"  Shape=({Z},{Y},{X}) sp={spacing.round(3)} HU=[{ct_vol.min():.0f},{ct_vol.max():.0f}]")
-            print(f"  3D labels: {sorted(lm_3d.keys())}")
+            print(f"  3D labels: {n_centroids} centroids + {n_pedicles} pedicle points  {sorted(lm_3d.keys())}")
 
         sets = self._discover_sets(min_labels)
         if verbose:
@@ -251,11 +313,13 @@ class GenericPatientLoader:
                 pts3d = np.array([lm_3d[l] for l in common])
                 pts2d = np.array([lumbar_2d[l] for l in common])
                 try:
-                    R_init, t_init = _solve_pnp(pts3d, pts2d)
-                    reproj_err     = _reproj_err(pts3d, pts2d, R_init, t_init)
+                    R_init, t_init = _solve_pnp(pts3d, pts2d, self.cam.K)
+                    reproj_err     = _reproj_err(pts3d, pts2d, R_init, t_init,
+                                                 self.cam.fx, self.cam.fy,
+                                                 self.cam.cx, self.cam.cy)
                     if verbose:
                         print(f"  {set_name}: EPnP reproj={reproj_err:.2f}px "
-                              f"({reproj_err*CAM_PIX_MM:.2f}mm) labels={common}")
+                              f"({reproj_err*self.cam.pixel_spacing_mm:.2f}mm) labels={common}")
                 except Exception as e:
                     if verbose: print(f"  {set_name}: EPnP failed ({e}) → anatomy")
                     R_init = None
