@@ -1,0 +1,8 @@
+﻿{
+    "name": "Ziehm Vision FD",
+    "sid_mm": 1050.0,
+    "pixel_spacing_mm": 0.288,
+    "image_size_px": 1024,
+    "notes": "Ziehm Vision RFD 3D C-arm. SID=1050mm verified from DICOM tag (0018,1110). Pixel spacing=0.288mm/px from DICOM private tag (0019,1213). Corrected from wrong default values (SID=1110mm, pixel_spacing=0.2mm/px)."
+}
+

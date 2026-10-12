@@ -313,6 +313,19 @@ class DeepFluoroDRR:
         step_mm  = mean_len / n_steps
         t_vals   = torch.linspace(0.0, mean_len, n_steps, device=dev)
 
+        # ── Per-pixel sample jitter (anti-moire) ────────────────────────────
+        # Ray marching at fixed step spacing can alias against the CT's
+        # regular slice spacing (e.g. 0.6mm), producing coherent diagonal
+        # moire stripe artifacts across the whole image (confirmed bug on
+        # several patients — visually verified, increasing n_steps alone
+        # does not reliably fix it since the interference depends on exact
+        # spacing alignment). Adding a small random per-ray offset to the
+        # sample positions decorrelates the two grids and eliminates the
+        # coherent stripe pattern while only mildly increasing per-pixel
+        # sampling noise (averaged out by the line integral over many steps).
+        jitter_frac = torch.rand(N, N, device=dev)          # (N, N) in [0,1)
+        jitter_mm   = (jitter_frac - 0.5) * step_mm         # +/- half a step
+
         # ── Chunked ray casting (avoids OOM for large N×n_steps) ──────────
         # Peak tensor: (n_steps, chunk_rows, N, 3) — tune chunk_rows to fit VRAM.
         # At N=1024, n_steps=400: full alloc = 400×1024×1024×3×4B = 4.7 GiB.
@@ -330,10 +343,15 @@ class DeepFluoroDRR:
             row_end  = min(row_start + chunk_rows, N)
             rn_chunk = ray_norm[row_start:row_end]   # (R, N, 3)
             R_chunk  = row_end - row_start
+            jitter_chunk = jitter_mm[row_start:row_end]   # (R, N)
+
+            # t per pixel = base t_vals + per-pixel jitter (broadcasts over steps)
+            # (n_steps, R, N)
+            t_per_pixel = t_vals.view(n_steps, 1, 1) + jitter_chunk.unsqueeze(0)
 
             # (n_steps, R, N, 3)
             pts = (src_t.view(1, 1, 1, 3)
-                   + t_vals.view(n_steps, 1, 1, 1) * rn_chunk.unsqueeze(0))
+                   + t_per_pixel.unsqueeze(-1) * rn_chunk.unsqueeze(0))
 
             grid  = self._world_to_norm(pts)          # (n_steps, R, N, 3)
             g5    = grid.unsqueeze(0)                 # (1, n_steps, R, N, 3)

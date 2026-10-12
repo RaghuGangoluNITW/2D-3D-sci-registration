@@ -63,7 +63,7 @@ def suppress_metal(
     # Instruments are the abnormally bright pixels — we take the HIGHER of the
     # image's p97 (top 3% brightest) and the hard_floor (0.82).  This ensures:
     #   • We never mask pixels below 0.82 (that would include bright bone)
-    #   • On high-contrast images with many instruments (Swaroopa), the p97
+    #   • On high-contrast images with many instruments (patients with dense instrumentation), the p97
     #     auto-adjusts upward to target only the very brightest metal.
     p_thresh = float(np.percentile(xray, percentile))
     thresh   = max(p_thresh, hard_floor)

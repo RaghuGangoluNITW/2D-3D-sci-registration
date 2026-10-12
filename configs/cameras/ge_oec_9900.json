@@ -1,0 +1,7 @@
+{
+    "name": "GE OEC 9900",
+    "sid_mm": 1020.0,
+    "pixel_spacing_mm": 0.184,
+    "image_size_px": 1024,
+    "notes": "GE OEC 9900 Elite mobile C-arm. SID approx 1020mm, pixel spacing 0.184mm/px at 1024px. Verify with calibration phantom."
+}

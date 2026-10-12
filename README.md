@@ -1,266 +1,151 @@
-# 2D-3D Intraoperative Spine Registration
+﻿# 2D/3D Fluoroscopy Registration Pipeline
+### Automatic Intraoperative Spine / Pelvis Registration from C-arm X-rays
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-> **Intraoperative Spine Level Identification via 2D/3D Registration**  
-> CT ↔ C-arm X-ray registration using EPnP initialisation + CMA-ES optimisation  
-> Evaluated on 9 patients, 51 C-arm sets — mean final PDE: **1.63 mm**
+**Version:** 1.0
+**Release Date:** October 2026
+**Institution:** NIMS Neurosurgery / Research
 
 ---
 
-## 📋 Overview
+## What This Does
 
-This repository provides a complete pipeline for **2D/3D registration** of preoperative CT volumes to intraoperative C-arm fluoroscopy images for spine surgery. It identifies vertebral levels (L1–L5) in the operating room without requiring additional DICOM metadata.
+This software automatically registers a patient's pre-operative CT scan to an
+intraoperative C-arm fluoroscopy X-ray, providing real-time 3D spine/pelvis
+pose estimation during surgery with **zero manual intervention** on the C-arm
+images and **zero additional hardware** beyond a standard C-arm machine.
 
-### Pipeline Summary
+### Validated Results
 
-```
-Preop CT (NRRD)         Intraop C-arm (NRRD)
-     +                         +
-CT Centroids              X-ray Centroids
- (.mrk.json)               (.mrk.json)
-     |                         |
-     └────────┬────────────────┘
-              ▼
-       EPnP Initialisation
-       (cv2.solvePnP)
-              ▼
-    CMA-ES Optimisation
-    (DRR ↔ X-ray similarity)
-              ▼
-    Registered 6-DOF Pose
-    + Per-vertebra Deformation
-              ▼
-    PDE metric (mm) + Report PDF
-```
-
-### Key Results
-
-| Metric | Value |
-|---|---|
-| Patients | 9 |
-| C-arm sets | 51 (AP + LAT) |
-| Mean final PDE | **1.63 mm** |
-| Sets ≤ 2 mm | **84%** |
-| Success rate | **100%** |
-| Mean runtime / set | ~8 s (GPU) |
+| Test | Dataset | Accuracy | Notes |
+|---|---|---|---|
+| Pelvis, real fluoroscopy | DeepFluoro (Johns Hopkins, cadaveric) | **4.3 mm PDE** | Real intraoperative X-rays |
+| Spine, synthetic DRR | VerSe19 (public lumbar CT) | **0.32 mm PDE** | 7/10 starts sub-2mm |
 
 ---
 
-## 🗂️ Repository Structure
+## Quick Start
 
-```
-2D-3D-sci-registration/
-├── src/                          # Core library modules
-│   ├── generic_patient_loader.py   # Unified loader for all patients
-│   ├── deepfluoro_drr.py           # GPU DRR renderer (PyTorch)
-│   ├── deepfluoro_loader.py        # DeepFluoro dataset support
-│   ├── optimizer.py                # CMA-ES optimisation
-│   ├── similarity.py               # GO cost + NCC metrics
-│   ├── deformable_registration.py  # Per-vertebra deformation
-│   ├── drr.py                      # DRR utilities
-│   ├── registration.py             # Registration helpers
-│   └── ...                         # Patient-specific loaders
-│
-├── run_new_patients.py           # ★ Main pipeline runner
-├── generate_report.py            # PDF report generator
-├── analyse_loss_pde.py           # Loss landscape analysis
-│
-├── scripts/                      # Visualisation & diagnostic scripts
-│
-├── data/                         # Dataset folder
-│   ├── BIKNA/
-│   │   ├── CT label/
-│   │   │   ├── <CT_scan>.nrrd        # Preop CT volume (not in repo — see below)
-│   │   │   └── CENTROID.mrk.json     # 3D vertebra centroids (LPS mm)
-│   │   └── XRAY Label/
-│   │       ├── XRAY-AP/
-│   │       │   ├── AP-SET-1/
-│   │       │   │   ├── <xray>.nrrd       # C-arm image (not in repo — see below)
-│   │       │   │   └── CENTROID.mrk.json # 2D pixel centroids
-│   │       │   └── AP-SET-2/ ...
-│   │       └── XRAY-LAT/ ...
-│   └── <PATIENT>/ ...            # Same structure for each patient
-│
-├── results/
-│   └── newdata/
-│       ├── all_results.json          # Combined results for all patients
-│       ├── registration_report.pdf   # ★ Full evaluation report (PDF)
-│       └── <PATIENT>/
-│           ├── results.json              # Per-patient metrics
-│           └── <SET>_overlay.png         # 3-panel visualisation
-│
-├── manuscript/                   # LaTeX manuscript files
-├── requirements.txt
-└── README.md
-```
-
----
-
-## 🚀 Quick Start
-
-### 1. Clone the repository
-
-```bash
-git clone https://github.com/RaghuGangoluNITW/2D-3D-sci-registration.git
-cd 2D-3D-sci-registration
-```
-
-### 2. Install dependencies
+### Option A: Streamlit GUI (recommended)
 
 ```bash
 pip install -r requirements.txt
+pip install -r gui/requirements_gui.txt
+cd gui
+streamlit run app.py --server.port 9500
+# Open browser: http://127.0.0.1:9500
 ```
 
-### 3. Prepare your data
-
-Each patient must follow this folder layout under `data/`:
-
-```
-data/<PATIENT_NAME>/
-    CT label/
-        <any_name>.nrrd         ← preop CT volume (exported from 3D Slicer)
-        CENTROID.mrk.json       ← 3D vertebra centroids (L1–L5) in LPS mm
-    XRAY Label/
-        XRAY-AP/
-            AP-SET-1/
-                <any_name>.nrrd         ← 1024×1024 C-arm AP image
-                CENTROID.mrk.json       ← 2D pixel centroids (u,v,0)
-            AP-SET-2/ ...
-        XRAY-LAT/
-            LAT-SET-1/ ...
-```
-
-**Landmark files** (`.mrk.json`) are standard [3D Slicer](https://www.slicer.org/) Markups JSON files.  
-Label names must be from: `L1, L2, L3, L4, L5` (and optionally `D11, D12`).
-
-> ⚠️ **CT NRRDs and X-ray NRRDs are not included** in this repository due to file size.  
-> The `data/` folder contains only the `.mrk.json` centroid annotation files.  
-> Please contact the authors or obtain the clinical data through your institution.
-
-### 4. Run the pipeline
+### Option B: Command line (DeepFluoro 4.3 mm result)
 
 ```bash
-# Run all patients found in data/
-python run_new_patients.py
-
-# Run specific patients
-python run_new_patients.py --patients BIKNA JYOTHI
-
-# Check geometry only (DRR render test, no optimisation)
-python run_new_patients.py --geometry_only --verbose
-
-# Adjust CMA-ES settings
-python run_new_patients.py --starts 32 --rot 15 --trans 30
+pip install -r requirements.txt
+# Download DeepFluoro: https://doi.org/10.7281/T1/IFSXNV
+# Place at: data/deepfluoro/ipcai_2020_full_res_data.h5
+cd pipeline
+python build_drr_bank_deepfluoro.py
+python run_deepfluoro_multiview_test.py
 ```
 
-### 5. Generate the PDF report
+### Option C: Command line (VerSe spine 0.32 mm result)
 
 ```bash
-python generate_report.py
-# Output: results/newdata/registration_report.pdf
+# Download VerSe19 sub-verse010: https://osf.io/nqjyw/
+# Place at: data/verse/sub-verse010_ct.nii.gz
+cd pipeline
+python run_verse_multiview_test.py
 ```
 
 ---
 
-## ⚙️ Camera Model
+## Folder Structure
 
-The pipeline assumes a **Ziehm Vision FD** C-arm (fixed intrinsics):
-
-| Parameter | Value |
-|---|---|
-| SID | 1110 mm |
-| Pixel spacing | 0.2 mm/px |
-| Image size | 1024 × 1024 px |
-| Fx = Fy | 5550 px |
-
-To use a different C-arm, update the constants in `src/generic_patient_loader.py`:
-```python
-CAM_SID_MM   = 1110.0
-CAM_PIX_MM   = 0.2
-CAM_IMG_SIZE = 1024
+```
+2D-3D-sci-registration/
+|
++-- README.md                          <- This file
++-- requirements.txt                   <- Python package dependencies
++-- RELEASE_NOTES.md                   <- What changed in this release
+|
++-- gui/                               <- Streamlit web application
+|   +-- app.py                         <- Main 5-step registration wizard
+|   +-- requirements_gui.txt           <- GUI-specific dependencies
+|   \-- README_GUI.md                  <- GUI quick-start guide
+|
++-- src/                               <- Core library modules
+|   +-- similarity.py                  <- Gradient Orientation (GO) metric
+|   +-- metal_suppression.py           <- Surgical instrument suppression
+|   +-- camera_config.py               <- C-arm camera geometry loader
+|   +-- deepfluoro_drr.py              <- GPU DRR renderer (Beer-Lambert)
+|   +-- deepfluoro_loader.py           <- DeepFluoro HDF5 data loader
+|   +-- landmark_model.py              <- LandmarkHeatmapNet CNN (18-class)
+|   +-- landmark_detector.py           <- Inference wrapper for CNN
+|   +-- landmark_dataset.py            <- Dataset constants and loading
+|   +-- cyclegan.py                    <- CycleGAN X-ray <-> DRR transfer
+|   +-- optimizer.py                   <- CMA-ES multi-start optimizer
+|   \-- generic_patient_loader.py      <- Patient data folder loader
+|
++-- pipeline/                          <- Runnable end-to-end scripts
+|   +-- drr_renderer.py                <- DRR renderer (standalone POC version)
+|   +-- load_deepfluoro.py             <- DeepFluoro dataset loader (POC)
+|   +-- load_verse_ct.py               <- VerSe19 CT loader
+|   +-- build_drr_bank.py              <- Generic DRR bank builder
+|   +-- build_drr_bank_deepfluoro.py   <- DeepFluoro-specific bank builder
+|   +-- run_deepfluoro_multiview_test.py  <- DeepFluoro 4.3mm test
+|   +-- run_verse_multiview_test.py       <- VerSe 0.32mm test
+|   +-- run_nims_multiview_test.py        <- NIMS real patient test
+|   +-- run_nims_auto_pedicle_test.py     <- NIMS auto-pedicle test
+|   \-- sanity_check_render.py            <- DRR renderer GPU sanity check
+|
++-- scripts/                           <- Training and data preparation
+|   +-- train_landmark_detector.py     <- LOPO CNN training (18-class heatmap)
+|   +-- train_cyclegan.py              <- CycleGAN domain adaptation training
+|   +-- generate_synthetic_drrs.py     <- Synthetic DRR bank generation from CT
+|   +-- extract_transverse_process_tips.py  <- CT pedicle auto-extraction
+|   \-- convert_xrays_to_drr.py        <- CycleGAN inference on real X-rays
+|
++-- configs/
+|   \-- cameras/                       <- Per-machine C-arm geometry configs
+|       +-- ziehm_vision_fd.json       <- Ziehm Vision RFD 3D (NIMS machine)
+|       +-- siemens_cios_spin.json     <- Siemens Cios Spin
+|       \-- ge_oec_9900.json           <- GE OEC 9900 Elite
+|
+\-- data/                              <- Data directory (user provides)
+    \-- sample/
+        \-- README_DATA.md             <- Instructions for placing datasets
 ```
 
 ---
 
-## 📐 Algorithm Details
+## System Requirements
 
-### Phase 1 — EPnP Initialisation
-- Matches 3D CT centroids to 2D X-ray centroids via `cv2.solvePnP` (EPnP for ≥4 landmarks, SQPNP for 3)
-- Provides initial 6-DOF extrinsic pose (R, t)
-
-### Phase 2 — CMA-ES Optimisation (3 resolution stages)
-| Stage | DRR size | Pixel spacing | Similarity |
-|---|---|---|---|
-| Coarse | 64 px | 3.2 mm/px | NCC |
-| Medium | 180 px | 1.14 mm/px | 0.5×GO + 0.5×NCC |
-| Fine | 256 px | 0.8 mm/px | NCC |
-
-A **safety net** reverts to the EPnP pose if the optimised PDE exceeds 1.5× the EPnP PDE.
-
-### Phase 3 — Per-vertebra Deformation
-Closed-form backprojection of 2D centroids onto 3D viewing rays gives intraoperative vertebra positions, capturing prone-positioning spinal deformation (~1–3 mm).
+| Component | Minimum | Recommended |
+|---|---|---|
+| Python | 3.8 | 3.10 |
+| GPU VRAM | 4 GB (CUDA) | 8 GB |
+| RAM | 16 GB | 32 GB |
+| Disk | 20 GB | 50 GB |
+| OS | Windows 10 / Ubuntu 20.04 | Windows 11 / Ubuntu 22.04 |
 
 ---
 
-## 📊 Results
+## Data Requirements
 
-Full results are in `results/newdata/`. See the [PDF report](results/newdata/registration_report.pdf).
+### DeepFluoro (4.3 mm pelvis test)
+- Source: https://doi.org/10.7281/T1/IFSXNV (free, CC BY-NC 4.0)
+- Place file at: `data/deepfluoro/ipcai_2020_full_res_data.h5`
 
-| Patient | Sets | EPnP PDE | Final PDE | Success |
-|---|---|---|---|---|
-| BIKNA | 6 | 1.77 mm | 1.77 mm | 6/6 |
-| JYOTHI | 6 | 0.48 mm | 0.57 mm | 6/6 |
-| NAYEEMA BEGUM | 6 | 0.52 mm | 0.52 mm | 6/6 |
-| RASVANTI | 6 | 2.00 mm | 2.11 mm | 6/6 |
-| SARKHI | 6 | 1.29 mm | 1.43 mm | 6/6 |
-| SHRILATHA | 6 | 3.06 mm | 3.06 mm | 6/6 |
-| SHRINIVAS | 6 | 2.08 mm | 2.20 mm | 6/6 |
-| Swaroop | 3 | 0.97 mm | 0.97 mm | 3/3 |
-| VIJAYALAXMI | 6 | 1.68 mm | 1.49 mm | 6/6 |
-| **COMBINED** | **51** | — | **1.63 mm** | **51/51** |
+### VerSe19 (0.32 mm spine test)
+- Source: https://osf.io/nqjyw/ (free, academic use)
+- Place files at: `data/verse/sub-verse010_ct.nii.gz`
+
+### NIMS real patient
+- Requires: patient CT (NRRD) + C-arm DICOM frames + 3D vertebra labels
+- Contact NIMS team for data access
 
 ---
 
-## 🛠️ Dependencies
+## License
 
-- Python 3.9+
-- PyTorch (CUDA recommended)
-- SimpleITK
-- OpenCV (`opencv-python`)
-- NumPy, SciPy
-- Matplotlib, Pillow
-- cmaes
-
-See `requirements.txt` for pinned versions.
-
----
-
-## 📄 Citation
-
-If you use this code in your research, please cite:
-
-```bibtex
-@article{gangolu2026spine,
-  title   = {Intraoperative Spine Level Identification via 2D/3D Registration},
-  author  = {Gangolu, Raghu and others},
-  journal = {Scientific Reports},
-  year    = {2026},
-  note    = {Under review}
-}
-```
-
----
-
-## 👤 Author
-
-**Raghu Gangolu**  
-National Institute of Technology Warangal (NITW)  
-GitHub: [@RaghuGangoluNITW](https://github.com/RaghuGangoluNITW)
-
----
-
-## 📜 License
-
-MIT License — see [LICENSE](LICENSE) for details.
+Research use only. Not approved for clinical use.
+DeepFluoro dataset: CC BY-NC 4.0 -- Grupp et al., Johns Hopkins University.
+VerSe19 dataset: see https://osf.io/nqjyw/

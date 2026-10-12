@@ -149,7 +149,8 @@ def gradient_orientation_similarity(
     return float(np.clip(go_similarity, 0, 1))
 
 
-def go_cost(drr: np.ndarray, rad: np.ndarray, sigma: float = 2.0) -> float:
+def go_cost(drr: np.ndarray, rad: np.ndarray, sigma: float = 2.0,
+            metal_mask: np.ndarray = None) -> float:
     """
     GO cost to MINIMIZE (1 - GO_similarity). Lower = better alignment.
     Used by the optimizer.
@@ -157,11 +158,24 @@ def go_cost(drr: np.ndarray, rad: np.ndarray, sigma: float = 2.0) -> float:
     Includes a coverage penalty: if the DRR has < 15% nonzero pixels the CT
     has been moved off-detector. Return worst cost (1.0) to prevent the
     optimizer settling on a blank-DRR local minimum.
+
+    Parameters
+    ----------
+    metal_mask : optional uint8 (H,W) mask where 255 = metal pixel.
+                 Metal regions are zeroed out in BOTH images before computing
+                 GO, so screws/rods don't dominate the gradient landscape.
     """
     # Coverage check — blank DRR means CT drifted off the detector
     coverage = np.count_nonzero(drr) / max(drr.size, 1)
     if coverage < 0.15:
         return 1.0  # worst possible cost
+
+    # Apply metal mask: zero-out metal regions in both images
+    if metal_mask is not None:
+        valid = (metal_mask == 0).astype(np.float32)
+        drr = drr * valid
+        rad = rad * valid
+
     return 1.0 - gradient_orientation_similarity(drr, rad, sigma=sigma)
 
 
@@ -169,17 +183,35 @@ def go_cost(drr: np.ndarray, rad: np.ndarray, sigma: float = 2.0) -> float:
 # Normalized Cross Correlation (fallback / additional metric)
 # ---------------------------------------------------------------------------
 
-def normalized_cross_correlation(img1: np.ndarray, img2: np.ndarray) -> float:
-    """NCC between two images in [-1, 1]. Higher = more similar."""
+def normalized_cross_correlation(img1: np.ndarray, img2: np.ndarray,
+                                 metal_mask: np.ndarray = None) -> float:
+    """NCC between two images in [-1, 1]. Higher = more similar.
+
+    Parameters
+    ----------
+    metal_mask : optional uint8 (H,W) mask where 255 = metal pixel.
+                 Metal regions are excluded from the NCC computation.
+    """
     if img1.shape != img2.shape:
         from skimage.transform import resize
         img2 = resize(img2.astype(np.float32), img1.shape,
                       anti_aliasing=True, preserve_range=True)
-    m1, m2 = img1.mean(), img2.mean()
-    s1, s2 = img1.std(), img2.std()
+
+    if metal_mask is not None:
+        valid = (metal_mask == 0).ravel()
+        a = img1.ravel()[valid]
+        b = img2.ravel()[valid]
+        if len(a) < 100:
+            return 0.0
+    else:
+        a = img1.ravel()
+        b = img2.ravel()
+
+    m1, m2 = a.mean(), b.mean()
+    s1, s2 = a.std(), b.std()
     if s1 < 1e-8 or s2 < 1e-8:
         return 0.0
-    ncc = ((img1 - m1) * (img2 - m2)).mean() / (s1 * s2)
+    ncc = ((a - m1) * (b - m2)).mean() / (s1 * s2)
     return float(ncc)
 
 
