@@ -216,11 +216,11 @@ class DRRDataset(Dataset):
     Domain B: synthetic DRR PNGs from data/synthetic_drrs/.
     """
 
-    # VIJAYALAXMI has an unresolved low-bone-contrast rendering bug
+    # Some patients may have low-bone-contrast rendering issues
     # (corrupted-looking curved pattern, not the moiré/jitter issue) --
     # always excluded regardless of what's left over in any local disk
     # cache, so a stale/partial cache copy can't leak bad DRRs in.
-    EXCLUDED_PATIENTS = {'VIJAYALAXMI'}
+    EXCLUDED_PATIENTS: set[str] = set()  # add patient IDs to skip
 
     def __init__(self, drr_root: Path, view: str = 'both',
                  size: int = TRAIN_SIZE, augment: bool = True):

@@ -41,7 +41,7 @@ import torchvision.transforms.functional as TF
 # / 340mm 3D pose error from just 1mm of 2D noise); adding the bilateral
 # pedicle points (spread left/right of the spine axis) was shown to
 # reduce that same-test error by roughly 2.5x-47x depending on noise
-# level (see project history / JYOTHI verification). See
+# level (see project history / internal verification). See
 # scripts/extract_transverse_process_tips.py for the full derivation and
 # scripts/build_augmented_landmark_manifest.py for how these are merged
 # into the training manifest.

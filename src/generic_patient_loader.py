@@ -16,7 +16,7 @@ Handles any patient following the canonical folder layout:
             XRAY-LAT/
                 LAT-SET-1/ ...
 
-Works for: MANGTA, NARSIMHA, SAMRAJYAM, SARKHI, Swaroop (and future patients).
+Works for: any patient folder following the standard directory layout.
 
 Camera model (Ziehm Vision FD assumed — no DICOM metadata):
     SID = 1110 mm,  pixel spacing = 0.2 mm/px at 1024 px,  Fx = Fy = 5550 px
@@ -226,12 +226,12 @@ class GenericPatientLoader:
     Load any patient in the newdata canonical folder format.
 
     Usage::
-        loader = GenericPatientLoader('/path/to/SARKHI')
+        loader = GenericPatientLoader('/path/to/PATIENT_001')
         spec   = loader.load()
         spec   = loader.load(min_labels=4)   # only sets with ≥4 common labels
 
         # Use a different C-arm model:
-        loader = GenericPatientLoader('/path/to/SARKHI', camera='siemens_cios_spin')
+        loader = GenericPatientLoader('/path/to/PATIENT_001', camera='siemens_cios_spin')
     """
 
     def __init__(self, patient_root: Path, camera: str = DEFAULT_CAMERA):

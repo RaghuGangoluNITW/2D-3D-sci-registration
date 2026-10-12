@@ -62,7 +62,7 @@ class SSMRegressorDetector:
     spine centroid position, scale, and shape variation.
 
     Usage::
-        det = SSMRegressorDetector(patient='SARKHI')
+        det = SSMRegressorDetector(patient='PATIENT_001')
         coords = det.predict(xray_np)   # {name: np.array([u,v])}
     """
 
@@ -91,7 +91,7 @@ class SSMRegressorDetector:
         if checkpoint is not None:
             ckpt_path = Path(checkpoint)
         elif patient is not None:
-            # Try view-specific first (fold_SARKHI_AP.pth), then fall back to combined
+            # Try view-specific first (fold_PATIENT_001_AP.pth), then fall back to combined
             view_ckpt = SSM_REG_DIR / f'fold_{patient}_{view}.pth' if view else None
             combined_ckpt = SSM_REG_DIR / f'fold_{patient}.pth'
             if view_ckpt and view_ckpt.exists():

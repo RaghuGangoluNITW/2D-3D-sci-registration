@@ -29,7 +29,7 @@ Usage
 python scripts/generate_synthetic_drrs.py
 
 # Single patient, 100 poses (quick test):
-python scripts/generate_synthetic_drrs.py --patients SARKHI --n_per_view 100
+python scripts/generate_synthetic_drrs.py --patients PATIENT_001 --n_per_view 100
 
 # All patients, full run (recommended):
 python scripts/generate_synthetic_drrs.py --n_per_view 500 --render_size 512
@@ -76,7 +76,7 @@ MANIFEST    = ROOT / 'data' / 'synthetic_drr_manifest.csv'
 # moire/ripple pattern overwhelming the anatomy signal) that increasing
 # n_steps (tested up to 800) did not resolve — likely a pose/geometry
 # calibration issue specific to this patient, out of scope for this fix.
-EXCLUDED_PATIENTS = {'VIJAYALAXMI'}
+EXCLUDED_PATIENTS: set[str] = set()  # add patient IDs to skip
 
 # Landmark names to project: centroids (D12 + lumbar) plus the extracted
 # non-collinear pedicle points (LEFT_PED/RIGHT_PED per level) -- see
@@ -93,8 +93,8 @@ SAVE_SIZE = 512
 # DRR render size (small → fast; upsampled to SAVE_SIZE on disk)
 # IMPORTANT: n_steps must be high enough to avoid ray-marching aliasing
 # artifacts on larger CT volumes (confirmed bug: n_steps=80 produces pure
-# noise/diagonal-stripe images on volumes with >450 Z-slices, e.g. BIKNA).
-# n_steps=200 gives clean images across all tested patients (SARKHI, BIKNA)
+# noise/diagonal-stripe images on volumes with >450 Z-slices, e.g. certain patients with CT artifacts).
+# n_steps=200 gives clean images across all tested patients (PATIENT_001, PATIENT_001)
 # at 256px render size — verified visually. Still fits comfortably in 4GB VRAM.
 RENDER_SIZE = 256
 N_STEPS     = 200

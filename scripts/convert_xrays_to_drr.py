@@ -27,7 +27,7 @@ Usage
 -----
 python scripts/convert_xrays_to_drr.py
 python scripts/convert_xrays_to_drr.py --ckpt checkpoints/cyclegan/best.pth
-python scripts/convert_xrays_to_drr.py --patients SARKHI Swaroop
+python scripts/convert_xrays_to_drr.py --patients PATIENT_001 PATIENT_002
 """
 
 import argparse

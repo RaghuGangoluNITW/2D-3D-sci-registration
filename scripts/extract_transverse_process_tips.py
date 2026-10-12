@@ -71,8 +71,8 @@ adjacent vertebra, or other bone. Treat this as a candidate landmark
 source to validate, not an established one.
 
 Usage:
-    python scripts/extract_transverse_process_tips.py --patient JYOTHI
-    python scripts/extract_transverse_process_tips.py --patient JYOTHI --verify
+    python scripts/extract_transverse_process_tips.py --patient PATIENT_001
+    python scripts/extract_transverse_process_tips.py --patient PATIENT_001 --verify
     python scripts/extract_transverse_process_tips.py --all
 """
 
@@ -95,7 +95,7 @@ BONE_HU_THRESHOLD = 250.0     # conservative cortical-bone threshold
 LOCAL_BOX_MM = 30.0           # half-width of local search box around each centroid
 MIN_TIP_DIST_MM = 8.0         # reject candidates too close to centroid (noise)
 MAX_TIP_DIST_MM = 42.0        # reject candidates too far (wrong structure -- rib/pelvis)
-# NOTE: measured on JYOTHI, genuine pedicle picks (confirmed visually)
+# NOTE: measured on a lumbar spine CT, verified visually
 # ranged 25-40mm from centroid -- the initial 28mm guess (based on
 # textbook lumbar pedicle width) was too tight for this patient and
 # rejected several correct picks. 42mm leaves a safety margin below
@@ -271,7 +271,7 @@ def process_patient(patient: str, verify: bool = False) -> Dict[str, np.ndarray]
     patient_dir = DATA_ROOT / patient
     ct_dir = patient_dir / 'CT label'
     # Some patients' 3D centroid files use different capitalisation/naming
-    # (e.g. Swaroop: 'centroid_3.mrk.json' instead of 'CENTROID.mrk.json').
+    # (e.g. some patients may use non-standard filenames like 'centroid_3.mrk.json' instead of 'CENTROID.mrk.json').
     centroid_path = ct_dir / 'CENTROID.mrk.json'
     if not centroid_path.exists():
         candidates = sorted(ct_dir.glob('*.mrk.json')) if ct_dir.exists() else []
