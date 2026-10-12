@@ -1,17 +1,17 @@
 ﻿# 2D/3D Fluoroscopy Registration Pipeline
 ### Automatic Intraoperative Spine / Pelvis Registration from C-arm X-rays
 
-**Version:** 1.0  
-**Release Date:** October 2026  
-**Institution:** NIMS Neurosurgery / Research  
+**Version:** 1.0
+**Release Date:** October 2026
+**Institution:** NIMS Neurosurgery / Research
 
 ---
 
 ## What This Does
 
 This software automatically registers a patient's pre-operative CT scan to an
-intraoperative C-arm fluoroscopy X-ray â€” providing real-time 3D spine/pelvis
-pose estimation during surgery, with **zero manual intervention** on the C-arm
+intraoperative C-arm fluoroscopy X-ray, providing real-time 3D spine/pelvis
+pose estimation during surgery with **zero manual intervention** on the C-arm
 images and **zero additional hardware** beyond a standard C-arm machine.
 
 ### Validated Results
@@ -25,47 +25,34 @@ images and **zero additional hardware** beyond a standard C-arm machine.
 
 ## Quick Start
 
-### 1. Install dependencies
+### Option A: Streamlit GUI (recommended)
 
 ```bash
 pip install -r requirements.txt
+pip install -r gui/requirements_gui.txt
+cd gui
+streamlit run app.py --server.port 9500
+# Open browser: http://127.0.0.1:9500
 ```
 
-For GPU (CUDA 12.x â€” strongly recommended):
-```bash
-pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121
-```
-
-### 2. Download the DeepFluoro dataset
+### Option B: Command line (DeepFluoro 4.3 mm result)
 
 ```bash
-# Dataset: Grupp et al., Johns Hopkins 2020 (CC BY-NC 4.0)
-# Download from: https://doi.org/10.7281/T1/IFSXNV
-# Place the file at: data/deepfluoro/ipcai_2020_full_res_data.h5
-```
-
-### 3. Run the validated DeepFluoro test (4.3 mm result)
-
-```bash
+pip install -r requirements.txt
+# Download DeepFluoro: https://doi.org/10.7281/T1/IFSXNV
+# Place at: data/deepfluoro/ipcai_2020_full_res_data.h5
 cd pipeline
-python build_drr_bank_deepfluoro.py        # Step 1: build DRR bank (~5 min)
-python run_deepfluoro_multiview_test.py    # Step 2: run registration
+python build_drr_bank_deepfluoro.py
+python run_deepfluoro_multiview_test.py
 ```
 
-### 4. Run the VerSe spine test (0.32 mm result)
+### Option C: Command line (VerSe spine 0.32 mm result)
 
 ```bash
-# Download VerSe19 sub-verse010 from: https://osf.io/nqjyw/
-# Place CT at: data/verse/sub-verse010_ct.nii.gz
+# Download VerSe19 sub-verse010: https://osf.io/nqjyw/
+# Place at: data/verse/sub-verse010_ct.nii.gz
 cd pipeline
-python run_verse_multiview_test.py         # Builds bank + runs registration
-```
-
-### 5. Sanity check the DRR renderer
-
-```bash
-cd pipeline
-python sanity_check_render.py
+python run_verse_multiview_test.py
 ```
 
 ---
@@ -74,41 +61,57 @@ python sanity_check_render.py
 
 ```
 2D-3D-sci-registration/
-â”œâ”€â”€ README.md                        â† This file
-â”œâ”€â”€ requirements.txt                 â† Python dependencies
-â”œâ”€â”€ RELEASE_NOTES.md                 â† What changed in this release
-â”œâ”€â”€ src/                             â† Core library modules
-â”‚   â”œâ”€â”€ similarity.py                â† GO similarity metric
-â”‚   â”œâ”€â”€ metal_suppression.py         â† Surgical instrument suppression
-â”‚   â”œâ”€â”€ camera_config.py             â† C-arm camera geometry loader
-â”‚   â”œâ”€â”€ deepfluoro_drr.py            â† GPU DRR renderer (Beer-Lambert)
-â”‚   â”œâ”€â”€ deepfluoro_loader.py         â† DeepFluoro HDF5 data loader
-â”‚   â””â”€â”€ optimizer.py                 â† CMA-ES multi-start optimizer
-â”œâ”€â”€ pipeline/                        â† Runnable scripts
-â”‚   â”œâ”€â”€ drr_renderer.py              â† DRR renderer (POC version)
-â”‚   â”œâ”€â”€ similarity.py                â† GO metric (POC version, standalone)
-â”‚   â”œâ”€â”€ load_deepfluoro.py           â† DeepFluoro loader (POC)
-â”‚   â”œâ”€â”€ load_verse_ct.py             â† VerSe CT loader
-â”‚   â”œâ”€â”€ build_drr_bank.py            â† Generic DRR bank builder
-â”‚   â”œâ”€â”€ build_drr_bank_deepfluoro.py â† DeepFluoro-specific bank builder
-â”‚   â”œâ”€â”€ run_deepfluoro_multiview_test.py â† DeepFluoro 4.3mm test
-â”‚   â”œâ”€â”€ run_verse_multiview_test.py      â† VerSe 0.32mm test
-â”‚   â”œâ”€â”€ run_nims_calibrated_multiview.py â† NIMS real patient test
-â”‚   â”œâ”€â”€ run_nims_auto_pedicle_poc.py    â† NIMS auto-pedicle test
-â”‚   â””â”€â”€ sanity_check_render.py           â† DRR renderer sanity check
-â”œâ”€â”€ scripts/                         â† Training and data preparation
-â”‚   â”œâ”€â”€ train_landmark_detector.py   â† LOPO CNN training
-â”‚   â”œâ”€â”€ train_cyclegan.py            â† CycleGAN domain adaptation training
-â”‚   â”œâ”€â”€ generate_synthetic_drrs.py   â† Synthetic DRR bank generation
-â”‚   â”œâ”€â”€ extract_transverse_process_tips.py â† CT pedicle auto-extraction
-â”‚   â””â”€â”€ convert_xrays_to_drr.py     â† CycleGAN inference on real X-rays
-â”œâ”€â”€ configs/
-â”‚   â””â”€â”€ cameras/                     â† Per-machine C-arm geometry configs
-â”‚       â”œâ”€â”€ ziehm_vision_fd.json     â† Ziehm Vision RFD 3D (NIMS)
-â”‚       â”œâ”€â”€ siemens_cios_spin.json   â† Siemens Cios Spin
-â”‚       â””â”€â”€ ge_oec_9900.json         â† GE OEC 9900
-â””â”€â”€ data/                            â† Data directory (user provides)
-    â””â”€â”€ sample/                      â† Place datasets here
+|
++-- README.md                          <- This file
++-- requirements.txt                   <- Python package dependencies
++-- RELEASE_NOTES.md                   <- What changed in this release
+|
++-- gui/                               <- Streamlit web application
+|   +-- app.py                         <- Main 5-step registration wizard
+|   +-- requirements_gui.txt           <- GUI-specific dependencies
+|   \-- README_GUI.md                  <- GUI quick-start guide
+|
++-- src/                               <- Core library modules
+|   +-- similarity.py                  <- Gradient Orientation (GO) metric
+|   +-- metal_suppression.py           <- Surgical instrument suppression
+|   +-- camera_config.py               <- C-arm camera geometry loader
+|   +-- deepfluoro_drr.py              <- GPU DRR renderer (Beer-Lambert)
+|   +-- deepfluoro_loader.py           <- DeepFluoro HDF5 data loader
+|   +-- landmark_model.py              <- LandmarkHeatmapNet CNN (18-class)
+|   +-- landmark_detector.py           <- Inference wrapper for CNN
+|   +-- landmark_dataset.py            <- Dataset constants and loading
+|   +-- cyclegan.py                    <- CycleGAN X-ray <-> DRR transfer
+|   +-- optimizer.py                   <- CMA-ES multi-start optimizer
+|   \-- generic_patient_loader.py      <- Patient data folder loader
+|
++-- pipeline/                          <- Runnable end-to-end scripts
+|   +-- drr_renderer.py                <- DRR renderer (standalone POC version)
+|   +-- load_deepfluoro.py             <- DeepFluoro dataset loader (POC)
+|   +-- load_verse_ct.py               <- VerSe19 CT loader
+|   +-- build_drr_bank.py              <- Generic DRR bank builder
+|   +-- build_drr_bank_deepfluoro.py   <- DeepFluoro-specific bank builder
+|   +-- run_deepfluoro_multiview_test.py  <- DeepFluoro 4.3mm test
+|   +-- run_verse_multiview_test.py       <- VerSe 0.32mm test
+|   +-- run_nims_multiview_test.py        <- NIMS real patient test
+|   +-- run_nims_auto_pedicle_test.py     <- NIMS auto-pedicle test
+|   \-- sanity_check_render.py            <- DRR renderer GPU sanity check
+|
++-- scripts/                           <- Training and data preparation
+|   +-- train_landmark_detector.py     <- LOPO CNN training (18-class heatmap)
+|   +-- train_cyclegan.py              <- CycleGAN domain adaptation training
+|   +-- generate_synthetic_drrs.py     <- Synthetic DRR bank generation from CT
+|   +-- extract_transverse_process_tips.py  <- CT pedicle auto-extraction
+|   \-- convert_xrays_to_drr.py        <- CycleGAN inference on real X-rays
+|
++-- configs/
+|   \-- cameras/                       <- Per-machine C-arm geometry configs
+|       +-- ziehm_vision_fd.json       <- Ziehm Vision RFD 3D (NIMS machine)
+|       +-- siemens_cios_spin.json     <- Siemens Cios Spin
+|       \-- ge_oec_9900.json           <- GE OEC 9900 Elite
+|
+\-- data/                              <- Data directory (user provides)
+    \-- sample/
+        \-- README_DATA.md             <- Instructions for placing datasets
 ```
 
 ---
@@ -118,7 +121,7 @@ python sanity_check_render.py
 | Component | Minimum | Recommended |
 |---|---|---|
 | Python | 3.8 | 3.10 |
-| GPU VRAM | 4 GB | 8 GB |
+| GPU VRAM | 4 GB (CUDA) | 8 GB |
 | RAM | 16 GB | 32 GB |
 | Disk | 20 GB | 50 GB |
 | OS | Windows 10 / Ubuntu 20.04 | Windows 11 / Ubuntu 22.04 |
@@ -127,26 +130,22 @@ python sanity_check_render.py
 
 ## Data Requirements
 
-### For DeepFluoro test (4.3 mm validated result)
-- **File:** `ipcai_2020_full_res_data.h5`
-- **Source:** https://doi.org/10.7281/T1/IFSXNV (free, CC BY-NC 4.0)
-- **Place at:** `data/deepfluoro/ipcai_2020_full_res_data.h5`
+### DeepFluoro (4.3 mm pelvis test)
+- Source: https://doi.org/10.7281/T1/IFSXNV (free, CC BY-NC 4.0)
+- Place file at: `data/deepfluoro/ipcai_2020_full_res_data.h5`
 
-### For VerSe spine test (0.32 mm validated result)
-- **File:** `sub-verse010_ct.nii.gz` + vertebra annotations
-- **Source:** https://osf.io/nqjyw/ (free, academic use)
-- **Place at:** `data/verse/`
+### VerSe19 (0.32 mm spine test)
+- Source: https://osf.io/nqjyw/ (free, academic use)
+- Place files at: `data/verse/sub-verse010_ct.nii.gz`
 
-### For NIMS real patient test
-- Requires: patient CT (NRRD format) + C-arm DICOM frames
-- Labeled AP/LAT X-ray sets with 2D vertebra positions (CENTROID.mrk.json)
+### NIMS real patient
+- Requires: patient CT (NRRD) + C-arm DICOM frames + 3D vertebra labels
 - Contact NIMS team for data access
 
 ---
 
 ## License
 
-Research use only. Not approved for clinical use.  
-DeepFluoro dataset: CC BY-NC 4.0 â€” Grupp et al., Johns Hopkins University.  
-VerSe19 dataset: see dataset license at https://osf.io/nqjyw/
-
+Research use only. Not approved for clinical use.
+DeepFluoro dataset: CC BY-NC 4.0 -- Grupp et al., Johns Hopkins University.
+VerSe19 dataset: see https://osf.io/nqjyw/
